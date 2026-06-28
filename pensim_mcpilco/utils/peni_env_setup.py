@@ -26,6 +26,10 @@ class PenSimEnv:
         self.random_seed_ref = 0
         self.fast = fast
         self.recipe_combo = recipe_combo
+        # When True, skip PenSim's built-in PAA PID and apply the commanded Fpaa
+        # directly (open-loop), giving an external agent genuine PAA-flow control.
+        # Default False keeps the recipe/BO baselines unchanged.
+        self.bypass_paa_pid = False
 
     def reset(self):
         """
@@ -636,7 +640,8 @@ class PenSimEnv:
         # Bulidng PID controller for PAA
         # builds the error history.  Samples 1 and 2 are calculated separately
         # because there is only instance of the error available
-        if self.ctrl_flags.Raman_spec == 2:
+        # bypass_paa_pid -> leave Fpaa = Fpaa_k (commanded), i.e. genuine open-loop PAA flow.
+        if self.ctrl_flags.Raman_spec == 2 and not self.bypass_paa_pid:
             PAA_sp = 1200
             if k == 1 or k == 2:
                 PAA_err = PAA_sp - x.PAA.y[0]
@@ -762,9 +767,12 @@ class PenSimEnv:
 
         return x
 
-    def get_batches(self, random_seed=0, include_raman=False):
+    def get_batches(self, random_seed=0, include_raman=False, return_batch_data=False):
         """
         Generate batch data in pandas dataframes.
+
+        If return_batch_data=True, also return the raw batch_data object (which
+        carries channels absent from the dataframe, e.g. PAA conc and Viscosity).
         """
         self.random_seed_ref = random_seed
 
@@ -789,4 +797,6 @@ class PenSimEnv:
                                                               Fs, Foil, Fg, pressure, discharge, Fw, Fpaa)
             batch_yield += reward
 
+        if return_batch_data:
+            return get_dataframe(batch_data, include_raman), batch_yield, batch_data
         return get_dataframe(batch_data, include_raman), batch_yield
