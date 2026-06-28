@@ -89,7 +89,8 @@ class Recipe:
         left_sp, right_sp = self.find_setpoints_interval(time)
 
         # forwarding filling
-        return left_sp.value
+        # return left_sp.value
+        return right_sp.value # fix to discharge to match baselines
 
 
 class RecipeCombo:

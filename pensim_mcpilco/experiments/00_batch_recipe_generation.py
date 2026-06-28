@@ -6,6 +6,12 @@ import matplotlib
 matplotlib.use("Agg")  # headless: write PNGs without a display
 import matplotlib.pyplot as plt
 
+# --- make this script runnable directly (no -m / PYTHONPATH) ---
+import os as _os, sys as _sys
+_ROOT = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))  # .../pensim_mcpilco
+_sys.path.insert(0, _ROOT)                    # for `utils`, `mcpilco`
+_sys.path.insert(0, _os.path.dirname(_ROOT))  # repo root, for `PenSimPy`
+
 from utils.recipe import Recipe, RecipeCombo
 from utils.peni_env_setup import PenSimEnv
 from PenSimPy.pensimpy.data.constants import FS, FOIL, FG, PRES, DISCHARGE, WATER, PAA
@@ -40,9 +46,16 @@ def run(n_batches = 10):
 
     per_batch = []
     conc_curves = {}
+    paa_curves = {}        # PAA concentration (mg/L) -- only on raw batch_data
+    visc_curves = {}       # Viscosity (cP)           -- only on raw batch_data
+    fpaa_curves = {}       # PAA flow-rate setpoint (L/h)
     for i in range(n_batches):
-        (df, _df_raman), batch_yield = env.get_batches(random_seed=i, include_raman=False)
+        (df, _df_raman), batch_yield, bx = env.get_batches(
+            random_seed=i, include_raman=False, return_batch_data=True)
         conc_curves[f"batch_{i}"] = df[CONC_COL]
+        paa_curves[f"batch_{i}"] = pd.Series(bx.PAA.y, index=df.index)
+        visc_curves[f"batch_{i}"] = pd.Series(bx.Viscosity.y, index=df.index)
+        fpaa_curves[f"batch_{i}"] = df["Phenylacetic acid flow-rate"]
         per_batch.append({
             "batch": i,
             "yield": batch_yield,
@@ -60,12 +73,18 @@ def run(n_batches = 10):
 
     conc_df = pd.DataFrame(conc_curves)
     conc_df.index.name = "time_h"
+    paa_df = pd.DataFrame(paa_curves);   paa_df.index.name = "time_h"
+    visc_df = pd.DataFrame(visc_curves); visc_df.index.name = "time_h"
+    fpaa_df = pd.DataFrame(fpaa_curves); fpaa_df.index.name = "time_h"
 
     # --- save CSVs ---
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     metrics.to_csv(os.path.join(OUTPUT_DIR, "per_batch_metrics.csv"))
     summary.to_csv(os.path.join(OUTPUT_DIR, "summary_stats.csv"))
     conc_df.to_csv(os.path.join(OUTPUT_DIR, "penicillin_concentration_timeseries.csv"))
+    paa_df.to_csv(os.path.join(OUTPUT_DIR, "paa_concentration_timeseries.csv"))
+    visc_df.to_csv(os.path.join(OUTPUT_DIR, "viscosity_timeseries.csv"))
+    fpaa_df.to_csv(os.path.join(OUTPUT_DIR, "fpaa_setpoint_timeseries.csv"))
 
     # --- plot 1: penicillin concentration over time (per batch + mean +/- std) ---
     mean_curve = conc_df.mean(axis=1)
