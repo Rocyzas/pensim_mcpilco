@@ -1,23 +1,4 @@
-"""
-Single-phase MC-PILCO baseline wrapper
 
-Design decisions (baseline):
-    1. Action  : PAA-flow setpoint; 
-        the recipe drives every other channel
-    2. Action type : ABSOLUTE setpoint — the policy outputs the Fpaa level directly
-        (action in [-1,1] -> [FPAA_MIN, FPAA_MAX]). This keeps the feed level in the GP's
-        action input so PAA dynamics are Markovian; an earlier INCREMENT design hid the
-        level from the GP and let the policy ratchet Fpaa -> 0.
-    3. Action freq : every 2 h
-    4. Observation : 6 online sensors [T, DO2, O2-offgas, CO2-offgas, pH, weight]
-                    + penicillin P (P is the reward - must be modelled state)
-    5. Monitor PAA conc + viscosity
-    6. Episode : default recipe runs first WARMUP_H hours open-loop; 
-                the RL agent takes over after that (100h+)
-    7. Reward  : penicillin concentration.
-    8. Constraints : hard fixed penalty for vessel overflow / blow-up; 
-                    soft proportional penalty otherwise
-"""
 import sys
 from pathlib import Path
 
@@ -53,14 +34,10 @@ WARMUP_H = 0.2 # recipe-only warmup; agent acts after
 T_SAMPLING = 2.0 # h between actions
 STEPS_PER_DECISION = int(round(T_SAMPLING / STEP_IN_HOURS))
 CONTROL_H = 230.0 - WARMUP_H
-# PAA feed-rate setpoint bounds (L/h): action in [-1,1] maps linearly onto this range.
-# Upper bound kept near the PID's working range (~4-12 L/h); the fpaa_sweep showed a
-# sustained feed >~10 L/h accumulates PAA to toxic levels, so the top of the range is a
-# soft-bad region the policy is expected to learn to avoid.
+
 FPAA_MIN, FPAA_MAX = 0.0, 15.0
 
-# physical (min, max) per state for [-1,1] squashing (default batches + headroom)
-# From the IndPenSim analysis
+
 STATE_RANGES = {
     # "T":         (296.0, 302.0),
     # "DO2":       (0.0,   25.0),
@@ -72,12 +49,12 @@ STATE_RANGES = {
 # MA Thesis adjusted
     "T":         (296.0, 302.0),
     "DO2":       (0.0,   30.0),
-    "O2":        (0.0,   100),
-    "CO2outgas": (0.0,   100),
-    "pH":        (0.0,   14),
-    "Wt":        (0,     111000),
+    "O2":        (0.15,  0.25),
+    "CO2outgas": (0.0,   4.0),
+    "pH":        (5.5,   7.5),
+    "Wt":        (5.0e4, 1.3e5),
     "PAA":       (600,   1800.0),
-    "P":         (0.0,   40.0),
+    "P":         (0.0,   60.0),
     "Culture_age": (0.0,   230.0),
 }
 # warmed-up physical state at t=WARMUP_H (default recipe);
@@ -91,8 +68,10 @@ INIT_STATE_PHYS = {"T": 297.65, "DO2": 14.74, "O2": 0.22, "CO2outgas": 0.09,
 
 # constraint thresholds (cost uses Wt/P/PAA; viscosity is monitor-only)
 WT_SOFT = (7.0e4, 1.1e5) 
-WT_OVERFLOW = 1.2e5 
-P_CRASH = 40.0 
+WT_OVERFLOW = 1.2e5
+# above the physical max (~35 g/L) so the hard penalty stops firing inside the
+# productive regime; P range widened to (0,60) to keep it below the clip boundary.
+P_CRASH = 55.0
 PAA_BAND = (600, 1800.0)
 VISC_MAX = 100.0 
 
@@ -140,13 +119,15 @@ class PenSimWrapper:
         })
 
     def rollout(self, s0, policy, T, dt, noise):
+        # noise: unused -- real rollouts observe the true sim state (noiseless);
+        # only the model/particle rollout is stochastic (via GP delta_var).
         env = PenSimEnv(recipe_combo=self._recipe, fast=True)
         env.random_seed_ref = self._episode + self.seed_offset
         _, bx = env.reset()
 
         spd = STEPS_PER_DECISION
-        k_warm = int(round(WARMUP_H / STEP_IN_HOURS)) # 500
-        n_decisions = int(T / dt) # 65
+        k_warm = int(round(WARMUP_H / STEP_IN_HOURS))
+        n_decisions = int(T / dt) # =114
         states = np.zeros((n_decisions + 1, STATE_DIM))
         inputs = np.zeros((n_decisions + 1, ACTION_DIM))
         mon = {a: [] for a in ("t", "PAA", "Viscosity", "Wt", "P", "Fpaa")}

@@ -32,7 +32,7 @@ def main(seed=1, num_trials=10, fast=False, out_dir=None):
 
 if __name__ == "__main__":
     p = argparse.ArgumentParser()
-    p.add_argument("--seed", type=int, default=1)
+    p.add_argument("--seed", type=int, default=0)
     p.add_argument("--num_trials", type=int, default=10)
     p.add_argument("--fast", action="store_true", help="small particles/steps/epochs for quick debugging")
     p.add_argument("--out_dir", type=str, default=None, help="override log_path")

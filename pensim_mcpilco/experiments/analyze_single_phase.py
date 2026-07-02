@@ -1,22 +1,8 @@
-"""
-Analysis / plots for the single-phase MC-PILCO baseline.
-
-Reads results/single_phase/seed{N}/{log.pkl, monitor.pkl} and produces a 2x3 figure:
-  row 1 (existing): final P per trial; PAA conc vs [600,1800] band; viscosity vs 100 cP;
-  row 2 (added):    PAA setpoint = the action (all episodes, with range);
-                    all-episode penicillin-concentration trajectories;
-                    penicillin yield (kg) per episode.
-PAA concentration is now an observed state and its band is penalised in the cost, so
-the per-episode printout also reports how many steps each episode spends out of band.
-Also prints, per episode, the final P, the yield, and the action (Fpaa) range.
-
-Usage:  PYTHONPATH=.. python -m experiments.analyze_single_phase --seeds 1
-"""
-import argparse
 import pickle
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -33,20 +19,19 @@ from utils.recipe import Recipe
 from utils.constants import STEP_IN_HOURS
 from PenSimPy.pensimpy.data.constants import DISCHARGE, DISCHARGE_DEFAULT_PROFILE
 
+SEEDS = [1]
+RESULTS_DIR = _os.path.join(_ROOT, "results/single_phase/cluster")
+OUT = _os.path.join(_ROOT, "results/single_phase/cluster/aggregate")
+RECIPE_DIR = _os.path.join(_ROOT, "results/batch_recipe_generation")
+NUM_EXPLORATIONS = 5
+RECIPE_BATCH = 1
+
 P_IDX = STATE_NAMES.index("P")
 _DISCH = Recipe(DISCHARGE_DEFAULT_PROFILE, DISCHARGE)
-
-# red bold dashed recipe-baseline reference (see experiments/00_batch_recipe_generation.py)
-RECIPE_DIR = "results/batch_recipe_generation"
 REF_STYLE = dict(color="red", lw=2.2, ls="--", zorder=6)
 
 
-def load_recipe_reference(batch=1, recipe_dir=RECIPE_DIR):
-    """Recipe-baseline batch (random_seed == batch) used as the red reference line.
-    Returns scalar final P / yield plus time-series for P, PAA conc, viscosity and
-    Fpaa. Time-series files are optional (re-run 00_batch_recipe_generation to make
-    them); a missing file just omits that curve."""
-    import pandas as pd
+def load_recipe_reference(batch=RECIPE_BATCH, recipe_dir=RECIPE_DIR):
     d = Path(recipe_dir)
     m = pd.read_csv(d / "per_batch_metrics.csv").set_index("batch")
     ref = {"batch": batch,
@@ -74,9 +59,6 @@ def final_P(state_norm):
 
 
 def yield_kg(mon):
-    """Penicillin yield (kg) of a batch from its native-resolution monitor:
-    net reactor-mass change + harvested (P * discharge * dt). Weight Wt is used as
-    the volume proxy (broth ~ water density)."""
     P, V, t = mon["P"], mon["Wt"], mon["t"]
     Fdis = np.array([_DISCH.get_value_at(float(tt)) for tt in t])
     net = (P[-1] * V[-1] - P[0] * V[0]) / 1000.0
@@ -86,14 +68,13 @@ def yield_kg(mon):
 
 def _ep_color(i, n_ep, n_expl):
     if i < n_expl:
-        return "0.72"                                  # exploration = grey
+        return "0.72"
     span = max(1, n_ep - n_expl - 1)
-    return cm.viridis((i - n_expl) / span)             # trials = dark->bright
+    return cm.viridis((i - n_expl) / span)
 
 
-def main(seeds, results_dir="results/single_phase",
-         out="results/single_phase/aggregate", num_explorations=5,
-         recipe_batch=1):
+def main(seeds=SEEDS, results_dir=RESULTS_DIR, out=OUT,
+         num_explorations=NUM_EXPLORATIONS, recipe_batch=RECIPE_BATCH):
     Path(out).mkdir(parents=True, exist_ok=True)
     fig, ax = plt.subplots(2, 3, figsize=(16, 9))
 
@@ -102,27 +83,22 @@ def main(seeds, results_dir="results/single_phase",
 
     for s in seeds:
         d = Path(results_dir) / f"seed{s}"
+        print(d)
         log_p, mon_p = d / "log.pkl", d / "monitor.pkl"
+        print('-->', log_p, mon_p)
         if not log_p.exists():
-            print(f"[skip] {log_p} not found"); continue
+            print("BEDABEDA")
+            continue
 
         hist = pickle.load(open(log_p, "rb"))["state_samples_history"]
-        finals = np.array([final_P(b)[0] for b in hist])     # ep 0.. = exploration then trials
+        finals = np.array([final_P(b)[0] for b in hist])
         ax[0, 0].plot(np.arange(len(finals)), finals, marker="o", label=f"seed {s}")
-        print(f"seed {s}: final P  expl={finals[:num_explorations].round(2)}  "
-              f"trials={finals[num_explorations:].round(2)}")
 
         if not mon_p.exists():
             continue
         monitors = pickle.load(open(mon_p, "rb"))
         n_ep = len(monitors)
 
-        last = monitors[-1]
-        paa_viol = int(((last["PAA"] < PAA_BAND[0]) | (last["PAA"] > PAA_BAND[1])).sum())
-        visc_viol = int((last["Viscosity"] > VISC_MAX).sum())
-        print(f"        last-episode violations: PAA={paa_viol} steps, viscosity={visc_viol} steps")
-
-        # all panels show every episode (PAA conc, viscosity, action, P, yield)
         yields = []
         for i, m in enumerate(monitors):
             c = _ep_color(i, n_ep, num_explorations)
@@ -136,20 +112,6 @@ def main(seeds, results_dir="results/single_phase",
         colors = [_ep_color(i, n_ep, num_explorations) for i in range(n_ep)]
         ax[1, 2].bar(np.arange(n_ep), yields, color=colors)
 
-        # per-episode printout: final P, yield, action range, PAA range + band violations
-        print(f"        per-episode [type | final P g/L | yield kg | Fpaa range L/h | "
-              f"PAA range mg/L | PAA out-of-band steps]:")
-        for i, (m, y) in enumerate(zip(monitors, yields)):
-            cmask = m["t"] >= WARMUP_H
-            fp = m["Fpaa"][cmask]
-            paa = m["PAA"][cmask]
-            paa_oob = int(((paa < PAA_BAND[0]) | (paa > PAA_BAND[1])).sum())
-            typ = "expl " if i < num_explorations else "trial"
-            print(f"          ep{i:2d} {typ} | P={final_P(hist[i])[0]:6.2f} | "
-                  f"yield={y:7.1f} | Fpaa [{fp.min():.2f},{fp.max():.2f}] | "
-                  f"PAA [{paa.min():5.0f},{paa.max():5.0f}] | oob={paa_oob}")
-
-    # ---- recipe-baseline reference (red bold dashed) ----
     ax[0, 0].axhline(ref["final_P"], label=ref_lbl, **REF_STYLE)
     ax[1, 2].axhline(ref["yield"], label=ref_lbl, **REF_STYLE)
     for axis, key in [(ax[0, 1], "PAA"), (ax[0, 2], "Viscosity"),
@@ -157,10 +119,7 @@ def main(seeds, results_dir="results/single_phase",
         if key in ref:
             t, y = ref[key]
             axis.plot(t, y, label=ref_lbl, **REF_STYLE)
-    print(f"recipe reference: batch {ref['batch']}  final P={ref['final_P']:.2f} g/L  "
-          f"yield={ref['yield']:.1f} kg")
 
-    # ---- row 1 (existing) ----
     ax[0, 0].set_title("Final penicillin conc per episode")
     ax[0, 0].set_xlabel("episode (0..=exploration then trials)"); ax[0, 0].set_ylabel("P (g/L)")
     ax[0, 0].grid(alpha=.3); ax[0, 0].legend(fontsize=8)
@@ -175,7 +134,6 @@ def main(seeds, results_dir="results/single_phase",
     ax[0, 2].set_title("Viscosity (all episodes)"); ax[0, 2].set_xlabel("time (h)")
     ax[0, 2].set_ylabel("viscosity (cP)"); ax[0, 2].grid(alpha=.3); ax[0, 2].legend(fontsize=6, ncol=2)
 
-    # ---- row 2 (added) ----
     ax[1, 0].axvline(WARMUP_H, color="gray", ls=":", label="RL on (100 h)")
     ax[1, 0].axhspan(FPAA_MIN, FPAA_MAX, color="orange", alpha=.06, label=f"clamp [{FPAA_MIN:.0f},{FPAA_MAX:.0f}]")
     ax[1, 0].set_title("FPAA setpoint = ACTION (all episodes)"); ax[1, 0].set_xlabel("time (h)")
@@ -195,15 +153,8 @@ def main(seeds, results_dir="results/single_phase",
     fig.tight_layout()
     fig.savefig(Path(out) / "single_phase_summary.png", dpi=150)
     plt.close(fig)
-    print(f"\nSaved {out}/single_phase_summary.png")
+    print(f"Saved {out}/single_phase_summary.png")
 
 
 if __name__ == "__main__":
-    p = argparse.ArgumentParser()
-    p.add_argument("--seeds", type=int, nargs="+", default=[1])
-    p.add_argument("--num_explorations", type=int, default=5,
-                   help="how many leading episodes are exploration (for labelling/colour)")
-    p.add_argument("--recipe_batch", type=int, default=1,
-                   help="recipe-baseline batch (== random_seed) used as the red reference line")
-    args = p.parse_args()
-    main(args.seeds, num_explorations=args.num_explorations, recipe_batch=args.recipe_batch)
+    main()

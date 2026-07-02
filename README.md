@@ -43,3 +43,7 @@ Raman enables (3 per paper): PAA (phenylacetic acid), X, P concentration.
 
 3. Actions
 - Fs (sugar feed), Foil, Fg (aeration feed), head pressure, F_discharge, Fw (water for dillution), Fpaa (PAA feed), NH3_shots (ammonia shots)
+
+# Decision on variables with justification
+ACTIONS:
+1. BO baseline uses 6: DISCHARGE, FS, FOIL, FG, PRES, WATER, FPAA (excluded)

@@ -1,15 +1,4 @@
-"""
-Configuration for Single-phase MC-PILCO baseline
 
-Currently:
-Observation = [T, DO2, O2-offgas, CO2-offgas, pH, weight, PAA conc, P]  (8, see pensim_wrapper).
-Action      = 1 PAA-flow increment every 2 h; 
-              recipe handles the rest; recipe-only
-              warmup for the first WARMUP_H h, then the RL agent.
-Reward      = penicillin concentration P, minus a PAA-band penalty
-              (penicillin_cost.PeniConcentrationCost).
-One RBF GP per state dim, SOD sparse approximation, squashed-RBF policy.
-"""
 from logging import config
 import sys
 from pathlib import Path
