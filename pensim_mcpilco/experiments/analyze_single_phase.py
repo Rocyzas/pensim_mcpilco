@@ -18,6 +18,7 @@ from mcpilco.pensim_wrapper import (STATE_NAMES, STATE_RANGES, PAA_BAND, VISC_MA
 from utils.recipe import Recipe
 from utils.constants import STEP_IN_HOURS
 from PenSimPy.pensimpy.data.constants import DISCHARGE, DISCHARGE_DEFAULT_PROFILE
+from experiments.eval_utils import yield_kg
 
 SEEDS = [1]
 RESULTS_DIR = _os.path.join(_ROOT, "results/single_phase/cluster")
@@ -27,7 +28,6 @@ NUM_EXPLORATIONS = 5
 RECIPE_BATCH = 1
 
 P_IDX = STATE_NAMES.index("P")
-_DISCH = Recipe(DISCHARGE_DEFAULT_PROFILE, DISCHARGE)
 REF_STYLE = dict(color="red", lw=2.2, ls="--", zorder=6)
 
 
@@ -56,14 +56,6 @@ def _denorm(x, lo, hi):
 def final_P(state_norm):
     P = _denorm(state_norm[:, P_IDX], *STATE_RANGES["P"])
     return float(P[-1]), float(P.mean())
-
-
-def yield_kg(mon):
-    P, V, t = mon["P"], mon["Wt"], mon["t"]
-    Fdis = np.array([_DISCH.get_value_at(float(tt)) for tt in t])
-    net = (P[-1] * V[-1] - P[0] * V[0]) / 1000.0
-    harvest = float((P * Fdis * STEP_IN_HOURS).sum()) / 1000.0
-    return net + harvest
 
 
 def _ep_color(i, n_ep, n_expl):

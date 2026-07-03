@@ -24,8 +24,9 @@ from utils.ode_patch import patch_fastodeint
 patch_fastodeint()
 
 # ADDING TIME
-# Without time, one value at different points in the batch results in opposite outcomes
-STATE_NAMES = ["T", "DO2", "O2", "CO2outgas", "pH", "Wt", "PAA", "P", "Culture_age"]
+# Without time, one value at different points in the batch results in opposite outcomes.
+# We feed absolute batch time (h) directly rather than culture age as its proxy.
+STATE_NAMES = ["T", "DO2", "O2", "CO2outgas", "pH", "Wt", "PAA", "P", "time"]
 STATE_DIM = len(STATE_NAMES)
 ACTION_DIM = 1
 
@@ -55,7 +56,7 @@ STATE_RANGES = {
     "Wt":        (5.0e4, 1.3e5),
     "PAA":       (600,   1800.0),
     "P":         (0.0,   60.0),
-    "Culture_age": (0.0,   230.0),
+    "time":      (0.0,   230.0),
 }
 # warmed-up physical state at t=WARMUP_H (default recipe);
 # PAA conc is held ~1200 mg/L by the recipe PID through warmup.
@@ -63,7 +64,7 @@ STATE_RANGES = {
                 #    "pH": 6.51, "Wt": 1.014e5, "PAA": 1200.0, "P": 13.04}
 INIT_STATE_PHYS = {"T": 297.65, "DO2": 14.74, "O2": 0.22, "CO2outgas": 0.09,
                    "pH": 6.44, "Wt": 61980.0, "PAA": 1422.0, "P": 0.01,
-                   "Culture_age": 0.2}
+                   "time": WARMUP_H}
 
 
 # constraint thresholds (cost uses Wt/P/PAA; viscosity is monitor-only)
@@ -82,7 +83,10 @@ def _normalise(value, lo, hi):
 
 def _read(batch_x, name, i):
     """Physical value of `name` at native index i. pH is stored as 10^(-pH)
-    mid-batch, so invert it back to pH units here."""
+    mid-batch, so invert it back to pH units here. `time` is not a batch channel;
+    native index i maps to absolute batch time (i+1)*STEP_IN_HOURS hours."""
+    if name == "time":
+        return (i + 1) * STEP_IN_HOURS
     if name == "pH":
         return -np.log10(max(float(getattr(batch_x, "pH").y[i]), 1e-12))
     return float(getattr(batch_x, name).y[i])
@@ -118,11 +122,20 @@ class PenSimWrapper:
             WATER: Recipe(WATER_DEFAULT_PROFILE, WATER), PAA: Recipe(PAA_DEFAULT_PROFILE, PAA),
         })
 
-    def rollout(self, s0, policy, T, dt, noise):
+    def rollout(self, s0, policy, T, dt, noise, seed=None, pid_baseline=False):
         # noise: unused -- real rollouts observe the true sim state (noiseless);
         # only the model/particle rollout is stochastic (via GP delta_var).
+        # seed: if given, drives the batch RNG directly (explicit/reproducible eval),
+        #   overriding the _episode+seed_offset counter; also reseeds numpy's global RNG
+        #   so the per-step Raman/PRBS noise is reproducible for this rollout.
+        # pid_baseline: if True, run PAA under PenSim's built-in PID (never bypassed) and
+        #   ignore `policy` -- the matched baseline arm for the RL-vs-PID comparison.
         env = PenSimEnv(recipe_combo=self._recipe, fast=True)
-        env.random_seed_ref = self._episode + self.seed_offset
+        if seed is not None:
+            np.random.seed(seed)
+            env.random_seed_ref = seed
+        else:
+            env.random_seed_ref = self._episode + self.seed_offset
         _, bx = env.reset()
 
         spd = STEPS_PER_DECISION
@@ -136,7 +149,7 @@ class PenSimWrapper:
         fpaa = float(self._recipe.recipe_dict[PAA].get_value_at(WARMUP_H))
         action_norm = np.zeros(ACTION_DIM)
         decision_idx = 0
-        last_good = None
+        last_good = np.zeros(STATE_DIM)  # safe default (PID arm never enters the decision block)
 
         for k in range(1, NUM_STEPS + 1):
             v = self._recipe.get_values_dict_at(time=k * STEP_IN_HOURS)
@@ -146,7 +159,7 @@ class PenSimWrapper:
                 fpaa_k = v[PAA]
             else:
                 local = k - k_warm - 1
-                if local % spd == 0 and decision_idx < n_decisions:
+                if not pid_baseline and local % spd == 0 and decision_idx < n_decisions:
 
                     # first controlled state = state at WARMUP_H
                     if decision_idx == 0:
@@ -163,12 +176,14 @@ class PenSimWrapper:
                     fpaa = float(FPAA_MIN + (action_norm[0] + 1.0) * 0.5 * (FPAA_MAX - FPAA_MIN))
                     inputs[decision_idx] = action_norm
 
-                # held over the 2 h window
-                fpaa_k = fpaa
+                # RL: hold the agent's Fpaa over the 2 h window.
+                # PID baseline: pass the recipe value (the PID overrides it internally).
+                fpaa_k = v[PAA] if pid_baseline else fpaa
 
-            # warmup: keep PenSim's PAA PID
-            # control phase: bypass it so the agent's Fpaa is applied open-loop.
-            env.bypass_paa_pid = k > k_warm
+            # warmup: keep PenSim's PAA PID.
+            # control phase: bypass it so the agent's Fpaa is applied open-loop,
+            # unless this is the PID-baseline arm (PID stays in control throughout).
+            env.bypass_paa_pid = (k > k_warm) and not pid_baseline
 
             _, bx, _, done = env.step(
                 k, bx, Fs=v[FS], Foil=v[FOIL], Fg=v[FG], pressure=v[PRES],
