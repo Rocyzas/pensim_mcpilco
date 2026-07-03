@@ -143,7 +143,8 @@ class PenSimWrapper:
         n_decisions = int(T / dt) # =114
         states = np.zeros((n_decisions + 1, STATE_DIM))
         inputs = np.zeros((n_decisions + 1, ACTION_DIM))
-        mon = {a: [] for a in ("t", "PAA", "Viscosity", "Wt", "P", "Fpaa")}
+        #  omits T/DO2/O2/CO2/pH because nothing downstream plots or constrains them
+        mon = {a: [] for a in ("t", "PAA", "Viscosity", "Wt", "P", "Fpaa", "yield_per_run")}
 
         # start at recipe value
         fpaa = float(self._recipe.recipe_dict[PAA].get_value_at(WARMUP_H))
@@ -185,7 +186,9 @@ class PenSimWrapper:
             # unless this is the PID-baseline arm (PID stays in control throughout).
             env.bypass_paa_pid = (k > k_warm) and not pid_baseline
 
-            _, bx, _, done = env.step(
+            # 3rd return is yield_per_run; summed over the batch it equals PenSimPy's
+            # batch_yield (the discharge-aware metric the recipe/BO baselines report).
+            _, bx, yield_per_run, done = env.step(
                 k, bx, Fs=v[FS], Foil=v[FOIL], Fg=v[FG], pressure=v[PRES],
                 discharge=v[DISCHARGE], Fw=v[WATER], Fpaa=fpaa_k,
             )
@@ -197,6 +200,7 @@ class PenSimWrapper:
             mon["Wt"].append(_read(bx, "Wt", i))
             mon["P"].append(_read(bx, "P", i))
             mon["Fpaa"].append(fpaa_k)
+            mon["yield_per_run"].append(yield_per_run)
 
             if k > k_warm and (k - k_warm - 1) % spd == spd - 1:
                 decision_idx += 1
