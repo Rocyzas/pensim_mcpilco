@@ -1,4 +1,10 @@
 #!/usr/bin/env bash
+
+#SBATCH --job-name=mcpilco_07_full
+#SBATCH -p Teaching
+#SBATCH --gres=gpu:1
+#SBATCH --mem=32G
+
 set -euo pipefail
 
 ARGS=(--seed 0 --num_trials 7)
