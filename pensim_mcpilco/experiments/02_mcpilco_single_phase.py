@@ -13,12 +13,21 @@ _sys.path.insert(0, _os.path.dirname(_ROOT))
 from mcpilco.config_single_phase import get_config
 from mcpilco.pensim_wrapper import PenSimWrapper, PenSimMCPILCO
 
+_RESULTS_ROOT = Path(_ROOT) / "results" / "single_phase"
+
+"""Auto-incrementing default log dir - not to overwrite:
+seed{seed}_1, seed{seed}_2,etc"""
+def _next_run_dir(seed):
+    n = 1
+    while (_RESULTS_ROOT / f"seed{seed}_{n}").exists():
+        n += 1
+    return str(_RESULTS_ROOT / f"seed{seed}_{n}")
+
 
 def main(seed=1, num_trials=10, fast=False, out_dir=None):
     cfg = get_config(seed=seed, num_trials=num_trials, fast=fast)
-    if out_dir is not None:
-        cfg["mc_pilco_init"]["log_path"] = out_dir
-    log_path = cfg["mc_pilco_init"]["log_path"]
+    log_path = out_dir if out_dir is not None else _next_run_dir(seed)
+    cfg["mc_pilco_init"]["log_path"] = log_path
     Path(log_path).mkdir(parents=True, exist_ok=True)
 
     wrapper = PenSimWrapper(**cfg["wrapper_par"])

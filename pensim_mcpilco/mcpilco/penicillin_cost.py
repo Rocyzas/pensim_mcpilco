@@ -12,19 +12,23 @@ from mcpilco.pensim_wrapper import (STATE_NAMES,
                                     WT_SOFT,
                                     WT_OVERFLOW,
                                     P_CRASH,
-                                    PAA_BAND)
+                                    PAA_BAND,
+                                    DO2_FLOOR)
 
 P_IDX = STATE_NAMES.index("P")
 WT_IDX = STATE_NAMES.index("Wt")
 PAA_IDX = STATE_NAMES.index("PAA")
+DO2_IDX = STATE_NAMES.index("DO2")
 
 
 class PeniConcentrationCost(CF.Expected_cost):
-    def __init__(self, p_weight=0.05, hard_penalty=50.0, soft_penalty=0.5, paa_penalty=100, rate_penalty=0.5):
+    def __init__(self, p_weight=0.05, hard_penalty=50.0, soft_penalty=0.5, paa_penalty=100,
+                 do2_penalty=5.0, rate_penalty=0.5):
         self.p_weight = p_weight            # scales P (g/L) reward to O(1) per step
         self.hard_penalty = hard_penalty    # fixed
         self.soft_penalty = soft_penalty
         self.paa_penalty = paa_penalty
+        self.do2_penalty = do2_penalty      # smooth floor penalty: Fs overfeed -> DO2 crash
         self.rate_penalty = rate_penalty
         super().__init__(cost_function=self._cost)
 
@@ -36,6 +40,7 @@ class PeniConcentrationCost(CF.Expected_cost):
         P = self._dn(states_sequence[:, :, P_IDX], *STATE_RANGES["P"]) # g/L
         Wt = self._dn(states_sequence[:, :, WT_IDX], *STATE_RANGES["Wt"]) # kg
         PAA = self._dn(states_sequence[:, :, PAA_IDX], *STATE_RANGES["PAA"]) # mg/L
+        DO2 = self._dn(states_sequence[:, :, DO2_IDX], *STATE_RANGES["DO2"]) # mg/L
 
         # maximise P
         reward = self.p_weight * P
@@ -52,6 +57,10 @@ class PeniConcentrationCost(CF.Expected_cost):
         paa_dev_lo = torch.relu((paa_lo - PAA) / 1e3)
         paa_dev_hi = torch.relu((PAA - paa_hi) / 1e3)
         paa_soft = self.paa_penalty * (paa_dev_lo**2 + paa_dev_hi**2)
+
+        # SOFT smooth DO2 floor penalty: aggressive Fs outruns the fixed-recipe aeration and
+        # crashes dissolved O2 -> DO2-inhibition caps production. Penalise DO2 below the floor.
+        do2_soft = self.do2_penalty * torch.relu((DO2_FLOOR - DO2) / DO2_FLOOR)**2
         # paa_soft = self.paa_penalty * (paa_dev_lo + paa_dev_hi)
         # paa_soft = self.paa_penalty * (torch.relu((paa_lo - PAA) / 1e3) + torch.relu((PAA - paa_hi) / 1e3))
 
@@ -62,6 +71,6 @@ class PeniConcentrationCost(CF.Expected_cost):
         action_rate[1:] = self.rate_penalty * du**2  # first step has no predecessor -> 0
 
         # Minimise
-        return -reward + hard + soft + paa_soft + action_rate
+        return -reward + hard + soft + paa_soft + do2_soft + action_rate
         
         # return -reward
