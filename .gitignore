@@ -1,0 +1,17 @@
+# Only pensim_mcpilco/ is tracked in this repo
+/IndPenSim_V2.02/
+/MC-PILCO/
+/PenSimPy/
+/pensim_mcpilco-gen/
+/.claude/
+
+# Python / editor / OS cruft
+__pycache__/
+*.py[cod]
+.DS_Store
+.ipynb_checkpoints/
+
+# Results
+pensim_mcpilco/experiments/results/
+pensim_mcpilco/results/
+pensim_mcpilco/experiments/rl_vs_pid/

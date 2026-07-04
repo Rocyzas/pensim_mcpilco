@@ -22,6 +22,7 @@ from mcpilco.pensim_wrapper import (STATE_DIM,
 
 
 def get_config(seed=1, num_trials=10, fast=False, dtype=torch.float64, device=torch.device("cpu")):
+    # For Policy's initial centers/weioghts, and MCPILCO particle sampling/dropout
     torch.manual_seed(seed)
     np.random.seed(seed)
 

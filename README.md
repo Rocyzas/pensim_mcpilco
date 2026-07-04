@@ -47,3 +47,11 @@ Raman enables (3 per paper): PAA (phenylacetic acid), X, P concentration.
 # Decision on variables with justification
 ACTIONS:
 1. BO baseline uses 6: DISCHARGE, FS, FOIL, FG, PRES, WATER, FPAA (excluded)
+
+
+
+<!-- COMPARISON  -  SEEDS -->
+Comparison is made in the @03_compare ipynb notebook
+
+1. Agent RNG seed (torch/numpy, global RNG) - controls learning algorithm's randomness, which is policy weight initialisation, particle sampling, dropout
+2. Batch seed (PenSimEnv random_seed_ref) - physical fermentation realisation, which is initial conditions, kinetics, disturbances.
