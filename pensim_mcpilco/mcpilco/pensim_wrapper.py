@@ -51,7 +51,6 @@ STATE_RANGES = {
     # "pH":        (5.5,   7.5),
     # "Wt":        (5.0e4, 1.3e5),
 
-# MA Thesis adjusted
     "T":         (296.0, 302.0),
     "DO2":       (0.0,   30.0),
     "O2":        (0.15,  0.25),
@@ -59,7 +58,8 @@ STATE_RANGES = {
     "pH":        (5.5,   7.5),
     "Wt":        (5.0e4, 1.3e5),
     "PAA":       (600,   1800.0),
-    "X":         (0.0,   25.0),    # biomass g/L (recipe reaches ~20); ground-truth state, not an online sensor
+     # biomass g/L (recipe reaches ~20); ground-truth state, not an online sensor
+    "X":         (0.0,   25.0),
     "P":         (0.0,   60.0),
     "time":      (0.0,   230.0),
 }
@@ -67,6 +67,7 @@ STATE_RANGES = {
 # PAA conc is held ~1200 mg/L by the recipe PID through warmup.
 # INIT_STATE_PHYS = {"T": 298.0, "DO2": 15.1, "O2": 0.19, "CO2outgas": 1.67,
                 #    "pH": 6.51, "Wt": 1.014e5, "PAA": 1200.0, "P": 13.04}
+# TODO: where these initial values come from????
 INIT_STATE_PHYS = {"T": 297.65, "DO2": 14.74, "O2": 0.22, "CO2outgas": 0.09,
                    "pH": 6.44, "Wt": 61980.0, "PAA": 1422.0, "X": 0.49, "P": 0.01,
                    "time": WARMUP_H}
@@ -78,7 +79,11 @@ WT_OVERFLOW = 1.2e5
 # above the physical max (~35 g/L) so the hard penalty stops firing inside the
 # productive regime; P range widened to (0,60) to keep it below the clip boundary.
 P_CRASH = 55.0
-PAA_BAND = (600, 1800.0)
+# productive PAA band: a STRICT subset of STATE_RANGES["PAA"]=(600,1800) so the cost
+# penalty is actually live. If band==range, clipped real rollouts keep PAA inside the
+# range and the term is dead (only fires in unclipped GP imagination). ~1200 mg/L PID
+# hold +/- 400 brackets the warmup init (1422) with margin.
+PAA_BAND = (800.0, 1600.0)
 VISC_MAX = 100.0 
 
 
@@ -179,6 +184,8 @@ class PenSimWrapper:
                         # bx - complete batch record (to call at specific time specvific value: bx.P.y[i])
                         states[0] = np.clip(np.nan_to_num(extract_state(bx, k_warm)), -1.0, 1.0)
                         last_good = states[0]
+
+                    # CREATING and clipping ACTION
                     raw = policy(states[decision_idx], decision_idx)
                     action_norm = np.clip(np.asarray(raw, dtype=float).ravel(), -1.0, 1.0)
                     # residual-on-recipe: the action is a correction factor held over the 2 h

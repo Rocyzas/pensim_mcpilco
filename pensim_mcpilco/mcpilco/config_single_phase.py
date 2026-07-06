@@ -93,10 +93,8 @@ def get_config(seed=1, num_trials=10, fast=False, dtype=torch.float64, device=to
         "f_control_policy": Policy.Sum_of_gaussians,
         "control_policy_par": control_policy_par,
         "f_cost_function": PeniConcentrationCost,
-        # RL drives Fs (residual on recipe). Reward = concentration P; keep PAA-band penalty
-        # (PAA stays PID-held in-band); add DO2-floor penalty (Fs overfeed crashes DO2);
-        # Wt soft/overflow + action-rate (on the Fs correction) round out the constraints.
-        "cost_function_par": {"p_weight": 0.05, "paa_penalty": 10, "do2_penalty": 5.0, "rate_penalty": 0.5},
+
+        "cost_function_par": {"p_weight": 0.05, "soft_penalty": 0.5, "paa_penalty": 10, "do2_penalty": 5.0, "rate_penalty": 0.5},
         "std_meas_noise": 0.01 * np.ones(STATE_DIM),
         "log_path": f"results/single_phase/seed{seed}",
         "dtype": dtype, "device": device,
