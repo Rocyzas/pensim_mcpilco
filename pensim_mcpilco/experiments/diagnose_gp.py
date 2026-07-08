@@ -145,7 +145,7 @@ def kstep_error_growth(agent, idx, ho_idx, has_ho, horizons, out, seed):
     ax.set_title("k-step-ahead prediction error growth\n(sliding-origin, open-loop, held-out vs in-sample)")
     ax.grid(alpha=.3, which="both"); ax.legend(fontsize=8)
     fig.tight_layout()
-    fpath = out / f"gp_kstep_seed{seed}_trial_{idx}.png"
+    fpath = out / f"gp_kstep_seed{seed}_trial_{idx}_updated_full07.png"
     fig.savefig(fpath, dpi=150); plt.close(fig)
     print(f"Saved {fpath}")
 
@@ -298,7 +298,7 @@ def main(seed=0, trial=None, num_trials=10, fast=False, results_dir="results/sin
     fig.tight_layout()
     out = d.parent / "aggregate"
     out.mkdir(parents=True, exist_ok=True)
-    fpath = out / f"gp_diag_seed{seed}_trial_{idx}.png"
+    fpath = out / f"gp_diag_seed{seed}_trial_{idx}_updated_full07.png"
     fig.savefig(fpath, dpi=150); plt.close(fig)
 
     print(f"\nX one-step (in-sample): R^2={r2_x:.3f}, MSE(norm delta)={per_dim_mse[X_IDX]:.4f}")

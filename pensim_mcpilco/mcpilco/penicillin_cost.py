@@ -1,3 +1,9 @@
+'''
+Dense reward implemented
+
+Todo: reward shaping
+'''
+
 import torch
 import policy_learning.Cost_function as CF
 
