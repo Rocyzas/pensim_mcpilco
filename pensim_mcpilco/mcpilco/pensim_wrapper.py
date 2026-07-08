@@ -8,6 +8,7 @@ sys.path.insert(0, str(ROOT / "MC-PILCO"))
 import policy_learning.MC_PILCO as MCP
 
 import numpy as np
+import torch
 
 from utils.peni_env_setup import PenSimEnv
 from utils.recipe import Recipe, RecipeCombo
@@ -26,7 +27,7 @@ patch_fastodeint()
 # ADDING TIME
 # Without time, one value at different points in the batch results in opposite outcomes.
 # We feed absolute batch time (h) directly rather than culture age as its proxy.
-STATE_NAMES = ["T", "DO2", "O2", "CO2outgas", "pH", "Wt", "PAA", "P", "time"]
+STATE_NAMES = ["T", "DO2", "O2", "CO2outgas", "pH", "Wt", "PAA", "X", "P", "time"]
 STATE_DIM = len(STATE_NAMES)
 ACTION_DIM = 1
 
@@ -37,6 +38,10 @@ STEPS_PER_DECISION = int(round(T_SAMPLING / STEP_IN_HOURS))
 CONTROL_H = 230.0 - WARMUP_H
 
 FPAA_MIN, FPAA_MAX = 0.0, 15.0
+# RL now drives Fs (sugar) as a RESIDUAL on the recipe: Fs = recipe_Fs(t) * (1 + FS_SCALE * a),
+# a in [-1,1] (neutral a=0 == recipe). Discharge + Fpaa revert to recipe/PID; only Fs varies.
+FS_SCALE = 0.5           # +/-50% correction band around the recipe Fs schedule
+DO2_FLOOR = 5.0          # mg/L; smooth penalty if aggressive Fs outruns aeration and crashes DO2
 
 
 STATE_RANGES = {
@@ -47,7 +52,6 @@ STATE_RANGES = {
     # "pH":        (5.5,   7.5),
     # "Wt":        (5.0e4, 1.3e5),
 
-# MA Thesis adjusted
     "T":         (296.0, 302.0),
     "DO2":       (0.0,   30.0),
     "O2":        (0.15,  0.25),
@@ -55,6 +59,8 @@ STATE_RANGES = {
     "pH":        (5.5,   7.5),
     "Wt":        (5.0e4, 1.3e5),
     "PAA":       (600,   1800.0),
+     # biomass g/L (recipe reaches ~20); ground-truth state, not an online sensor
+    "X":         (0.0,   25.0),
     "P":         (0.0,   60.0),
     "time":      (0.0,   230.0),
 }
@@ -62,8 +68,9 @@ STATE_RANGES = {
 # PAA conc is held ~1200 mg/L by the recipe PID through warmup.
 # INIT_STATE_PHYS = {"T": 298.0, "DO2": 15.1, "O2": 0.19, "CO2outgas": 1.67,
                 #    "pH": 6.51, "Wt": 1.014e5, "PAA": 1200.0, "P": 13.04}
+# TODO: where these initial values come from????
 INIT_STATE_PHYS = {"T": 297.65, "DO2": 14.74, "O2": 0.22, "CO2outgas": 0.09,
-                   "pH": 6.44, "Wt": 61980.0, "PAA": 1422.0, "P": 0.01,
+                   "pH": 6.44, "Wt": 61980.0, "PAA": 1422.0, "X": 0.49, "P": 0.01,
                    "time": WARMUP_H}
 
 
@@ -73,7 +80,11 @@ WT_OVERFLOW = 1.2e5
 # above the physical max (~35 g/L) so the hard penalty stops firing inside the
 # productive regime; P range widened to (0,60) to keep it below the clip boundary.
 P_CRASH = 55.0
-PAA_BAND = (600, 1800.0)
+# productive PAA band: a STRICT subset of STATE_RANGES["PAA"]=(600,1800) so the cost
+# penalty is actually live. If band==range, clipped real rollouts keep PAA inside the
+# range and the term is dead (only fires in unclipped GP imagination). ~1200 mg/L PID
+# hold +/- 400 brackets the warmup init (1422) with margin.
+PAA_BAND = (800.0, 1600.0)
 VISC_MAX = 100.0 
 
 
@@ -144,10 +155,11 @@ class PenSimWrapper:
         states = np.zeros((n_decisions + 1, STATE_DIM))
         inputs = np.zeros((n_decisions + 1, ACTION_DIM))
         #  omits T/DO2/O2/CO2/pH because nothing downstream plots or constrains them
-        mon = {a: [] for a in ("t", "PAA", "Viscosity", "Wt", "P", "Fpaa", "yield_per_run")}
+        mon = {a: [] for a in ("t", "PAA", "Viscosity", "Wt", "P", "Fs", "Fpaa", "discharge", "yield_per_run")}
 
-        # start at recipe value
-        fpaa = float(self._recipe.recipe_dict[PAA].get_value_at(WARMUP_H))
+        # RL drives Fs as a residual on the recipe; neutral correction a=0 -> recipe Fs.
+        # Discharge + Fpaa follow the recipe/PID (identical to the recipe baseline).
+        a_fs = 0.0
         action_norm = np.zeros(ACTION_DIM)
         decision_idx = 0
         last_good = np.zeros(STATE_DIM)  # safe default (PID arm never enters the decision block)
@@ -155,42 +167,45 @@ class PenSimWrapper:
         for k in range(1, NUM_STEPS + 1):
             v = self._recipe.get_values_dict_at(time=k * STEP_IN_HOURS)
 
+            # Everything except Fs follows the recipe/PID baseline:
+            # Fpaa (recipe early, PAA PID -> ~1200 mg/L after t>=10h) and discharge (recipe pulses).
+            fpaa_k = v[PAA]
+            discharge_k = v[DISCHARGE]
+
             if k <= k_warm:
-                # warmup: recipe drives PAA
-                fpaa_k = v[PAA]
+                # warmup: recipe drives Fs too
+                fs_k = v[FS]
             else:
                 local = k - k_warm - 1
                 if not pid_baseline and local % spd == 0 and decision_idx < n_decisions:
 
                     # first controlled state = state at WARMUP_H
                     if decision_idx == 0:
-                        # states[0] - first controlled 8-dim vector
+                        # states[0] - first controlled state vector
                         # bx - complete batch record (to call at specific time specvific value: bx.P.y[i])
                         states[0] = np.clip(np.nan_to_num(extract_state(bx, k_warm)), -1.0, 1.0)
                         last_good = states[0]
+
+                    # CREATING and clipping ACTION
                     raw = policy(states[decision_idx], decision_idx)
                     action_norm = np.clip(np.asarray(raw, dtype=float).ravel(), -1.0, 1.0)
-                    # absolute Fpaa setpoint: the action IS the feed level, so the GP's
-                    # action input becomes the actual driver of PAA dynamics (Markovian).
-                    # (Previously an increment `fpaa += action*FPAA_DELTA`, which hid the
-                    #  feed level from the GP and let the policy ratchet Fpaa -> 0.)
-                    fpaa = float(FPAA_MIN + (action_norm[0] + 1.0) * 0.5 * (FPAA_MAX - FPAA_MIN))
+                    # residual-on-recipe: the action is a correction factor held over the 2 h
+                    # window; a=0 -> recipe Fs, a=+/-1 -> +/-FS_SCALE around recipe. The recipe's
+                    # per-step shape is preserved (scaled), so the policy only learns corrections.
+                    a_fs = float(action_norm[0])
                     inputs[decision_idx] = action_norm
 
-                # RL: hold the agent's Fpaa over the 2 h window.
-                # PID baseline: pass the recipe value (the PID overrides it internally).
-                fpaa_k = v[PAA] if pid_baseline else fpaa
+                # RL: recipe Fs scaled by the held correction. PID/recipe baseline: recipe Fs.
+                fs_k = v[FS] if pid_baseline else v[FS] * (1.0 + FS_SCALE * a_fs)
 
-            # warmup: keep PenSim's PAA PID.
-            # control phase: bypass it so the agent's Fpaa is applied open-loop,
-            # unless this is the PID-baseline arm (PID stays in control throughout).
-            env.bypass_paa_pid = (k > k_warm) and not pid_baseline
+            # PAA PID stays in control throughout (never bypassed) -- exactly like the recipe.
+            env.bypass_paa_pid = False
 
             # 3rd return is yield_per_run; summed over the batch it equals PenSimPy's
             # batch_yield (the discharge-aware metric the recipe/BO baselines report).
             _, bx, yield_per_run, done = env.step(
-                k, bx, Fs=v[FS], Foil=v[FOIL], Fg=v[FG], pressure=v[PRES],
-                discharge=v[DISCHARGE], Fw=v[WATER], Fpaa=fpaa_k,
+                k, bx, Fs=fs_k, Foil=v[FOIL], Fg=v[FG], pressure=v[PRES],
+                discharge=discharge_k, Fw=v[WATER], Fpaa=fpaa_k,
             )
 
             i = k - 1
@@ -199,7 +214,9 @@ class PenSimWrapper:
             mon["Viscosity"].append(_read(bx, "Viscosity", i))
             mon["Wt"].append(_read(bx, "Wt", i))
             mon["P"].append(_read(bx, "P", i))
+            mon["Fs"].append(fs_k)
             mon["Fpaa"].append(fpaa_k)
+            mon["discharge"].append(discharge_k)
             mon["yield_per_run"].append(yield_per_run)
 
             if k > k_warm and (k - k_warm - 1) % spd == spd - 1:
@@ -218,8 +235,8 @@ class PenSimWrapper:
 
 class PenSimMCPILCO(MCP.MC_PILCO):
 
-    def __init__(self, pensim_wrapper, **kwargs):
-    
+    def __init__(self, pensim_wrapper, optim_horizon_steps=None, **kwargs):
+
         # mcpilco engine wants an ODE fn
         kwargs.setdefault("f_sim", lambda x, t, u: x)
         super().__init__(**kwargs)
@@ -227,15 +244,20 @@ class PenSimMCPILCO(MCP.MC_PILCO):
         # swap ODE -> PenSimPy
         self.system = pensim_wrapper
 
-    def _recipe_exploration_policy(self, noise_std=0.25):
-        """Exploration = perturbed recipe Fpaa schedule (low early, ramp up),
-        mapped to normalised actions. Gives the GP at least some P>0 batches."""
-        recipe = self.system._recipe
+        # Multi-origin short-rollout optimisation. Defaults -> disabled == stock MC-PILCO.
+        # optim_horizon_steps caps the IMAGINED GP-rollout length during policy optimisation
+        # (NOT the real 230 h batch); the anchors are the real states those short rollouts are
+        # launched from (populated by setup_recipe_anchors()). Both stay inert while None.
+        self.optim_horizon_steps = optim_horizon_steps
+        self._anchor_states = None
+        self._anchor_vars = None
+
+    def _recipe_exploration_policy(self, noise_std=0.4):
+        """Exploration = random Fs corrections around the recipe. Neutral action a=0 is the
+        recipe itself, so Gaussian noise about 0 brackets the recipe (Fs +/- FS_SCALE*noise),
+        giving the GP varied biomass/DO2/Wt trajectories without wandering far from baseline."""
         def pol(state, decision_idx):
-            t = WARMUP_H + decision_idx * T_SAMPLING          # decision time (h)
-            fpaa = float(recipe.recipe_dict[PAA].get_value_at(t))
-            a = 2.0 * (fpaa - FPAA_MIN) / (FPAA_MAX - FPAA_MIN) - 1.0   # Fpaa -> [-1,1]
-            a = a + noise_std * np.random.randn()
+            a = noise_std * np.random.randn()
             return np.clip(np.array([a]), -1.0, 1.0)
         return pol
 
@@ -259,3 +281,56 @@ class PenSimMCPILCO(MCP.MC_PILCO):
         self.noiseless_states_history.append(noiseless)
         self.num_data_collection += 1
         self.model_learning.add_data(new_state_samples=states, new_input_samples=inputs)
+
+    def setup_recipe_anchors(self, num_batches=2, num_anchors=12, anchor_var=0.01):
+        """Build the fixed anchor set for multi-origin short rollouts. Call ONCE before reinforce().
+
+        Rolls `num_batches` PURE-RECIPE (a=0) batches on a FRESH wrapper -- so the training run's own
+        episode/seed sequence is untouched (clean A/B vs a no-anchor run) -- adds them to the GP
+        training set (so every anchor is a state the GP has data around), then subsamples `num_anchors`
+        real states spread across batch time as the launch points p(x0) for policy optimisation.
+        """
+        seed_offset = self.system.seed_offset
+        anchor_policy = lambda state, decision_idx: np.array([0.0])   # a=0 -> recipe Fs
+        fresh = PenSimWrapper(seed_offset=seed_offset)
+
+        np_state = np.random.get_state()          # keep exploration RNG identical to a no-anchor run
+        batch_states = []
+        for i in range(num_batches):
+            states, inputs, _ = fresh.rollout(
+                s0=initial_state_norm(), policy=anchor_policy,
+                T=CONTROL_H, dt=self.T_sampling, noise=self.std_meas_noise,
+                seed=seed_offset + i,             # same simulator-seed family as the run
+            )
+            # recipe batches double as GP training data -> guarantees anchor coverage
+            self.model_learning.add_data(new_state_samples=states, new_input_samples=inputs)
+            batch_states.append(states)
+        np.random.set_state(np_state)
+
+        T = batch_states[0].shape[0]
+        time_idx = np.linspace(0, T - 1, num_anchors).round().astype(int)   # spread across the batch
+        anchors = np.stack([batch_states[j % num_batches][ti]               # round-robin over batches
+                            for j, ti in enumerate(time_idx)])
+        self._anchor_states = torch.tensor(anchors, dtype=self.dtype, device=self.device)
+        self._anchor_vars = torch.full((num_anchors, STATE_DIM), float(anchor_var),
+                                       dtype=self.dtype, device=self.device)
+        print(f"[anchors] {num_anchors} launch states from {num_batches} recipe batches "
+              f"(+{num_batches} into GP training set); optim_horizon_steps={self.optim_horizon_steps}")
+        return self._anchor_states
+
+    def reinforce_policy(self, *args, **kwargs):
+        # Inject the anchor set as the particle launch distribution -- OPTIMISATION ONLY.
+        # reinforce()'s data-collection x0 path is separate and stays untouched.
+        if self._anchor_states is not None:
+            kwargs["particles_initial_state_mean"] = self._anchor_states
+            kwargs["particles_initial_state_var"] = self._anchor_vars
+            kwargs["flg_particles_init_multi_gauss"] = True
+            kwargs["flg_particles_init_uniform"] = False
+        return super().reinforce_policy(*args, **kwargs)
+
+    def apply_policy(self, *args, **kwargs):
+        # Cap the imagined GP-rollout to the model's trustworthy horizon. apply_policy runs only
+        # during optimisation; T_control here is already control_horizon (in steps).
+        if self.optim_horizon_steps is not None and "T_control" in kwargs:
+            kwargs["T_control"] = min(int(kwargs["T_control"]), int(self.optim_horizon_steps))
+        return super().apply_policy(*args, **kwargs)

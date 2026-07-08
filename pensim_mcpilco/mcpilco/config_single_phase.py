@@ -21,7 +21,8 @@ from mcpilco.pensim_wrapper import (STATE_DIM,
                                     initial_state_norm)
 
 
-def get_config(seed=1, num_trials=10, fast=False, dtype=torch.float64, device=torch.device("cpu")):
+def get_config(seed=1, num_trials=10, fast=False, dtype=torch.float64, device=torch.device("cpu"),
+               optim_horizon_steps=None, num_anchor_batches=0, num_anchors=12, anchor_var=0.01):
     # For Policy's initial centers/weioghts, and MCPILCO particle sampling/dropout
     torch.manual_seed(seed)
     np.random.seed(seed)
@@ -93,9 +94,12 @@ def get_config(seed=1, num_trials=10, fast=False, dtype=torch.float64, device=to
         "f_control_policy": Policy.Sum_of_gaussians,
         "control_policy_par": control_policy_par,
         "f_cost_function": PeniConcentrationCost,
-        "cost_function_par": {"p_weight": 0.05, "paa_penalty": 10, "rate_penalty": 0.5},
+
+        "cost_function_par": {"p_weight": 0.05, "soft_penalty": 0.5, "paa_penalty": 10, "do2_penalty": 5.0, "rate_penalty": 0.5},
         "std_meas_noise": 0.01 * np.ones(STATE_DIM),
         "log_path": f"results/single_phase/seed{seed}",
+        # cap the imagined GP-rollout horizon during policy optimisation (None -> stock full 114)
+        "optim_horizon_steps": optim_horizon_steps,
         "dtype": dtype, "device": device,
     }
 
@@ -138,5 +142,8 @@ def get_config(seed=1, num_trials=10, fast=False, dtype=torch.float64, device=to
 
     wrapper_par = {"seed_offset": seed * 1000}
 
+    # multi-origin short-rollout anchors (num_batches=0 -> disabled; setup uses the run's seed_offset)
+    anchor_par = {"num_batches": num_anchor_batches, "num_anchors": num_anchors, "anchor_var": anchor_var}
+
     return {"mc_pilco_init": mc_pilco_init, "reinforce_par": reinforce_par,
-            "wrapper_par": wrapper_par}
+            "wrapper_par": wrapper_par, "anchor_par": anchor_par}

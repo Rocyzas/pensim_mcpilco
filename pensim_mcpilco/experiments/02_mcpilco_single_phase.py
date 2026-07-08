@@ -13,16 +13,31 @@ _sys.path.insert(0, _os.path.dirname(_ROOT))
 from mcpilco.config_single_phase import get_config
 from mcpilco.pensim_wrapper import PenSimWrapper, PenSimMCPILCO
 
+_RESULTS_ROOT = Path(_ROOT) / "results" / "single_phase"
 
-def main(seed=1, num_trials=10, fast=False, out_dir=None):
-    cfg = get_config(seed=seed, num_trials=num_trials, fast=fast)
-    if out_dir is not None:
-        cfg["mc_pilco_init"]["log_path"] = out_dir
-    log_path = cfg["mc_pilco_init"]["log_path"]
+"""Auto-incrementing default log dir - not to overwrite:
+seed{seed}_1, seed{seed}_2,etc"""
+def _next_run_dir(seed):
+    n = 1
+    while (_RESULTS_ROOT / f"seed{seed}_{n}").exists():
+        n += 1
+    return str(_RESULTS_ROOT / f"seed{seed}_{n}")
+
+
+def main(seed=1, num_trials=10, fast=False, out_dir=None,
+         optim_horizon=None, num_anchor_batches=0, num_anchors=12, anchor_var=0.01):
+    cfg = get_config(seed=seed, num_trials=num_trials, fast=fast,
+                     optim_horizon_steps=optim_horizon, num_anchor_batches=num_anchor_batches,
+                     num_anchors=num_anchors, anchor_var=anchor_var)
+    log_path = out_dir if out_dir is not None else _next_run_dir(seed)
+    cfg["mc_pilco_init"]["log_path"] = log_path
     Path(log_path).mkdir(parents=True, exist_ok=True)
 
     wrapper = PenSimWrapper(**cfg["wrapper_par"])
     agent = PenSimMCPILCO(pensim_wrapper=wrapper, **cfg["mc_pilco_init"])
+    # multi-origin short rollouts: build the fixed anchor set once, before training (no-op if disabled)
+    if num_anchor_batches > 0:
+        agent.setup_recipe_anchors(**cfg["anchor_par"])
     agent.reinforce(**cfg["reinforce_par"])
 
     # constraint plots
@@ -36,5 +51,13 @@ if __name__ == "__main__":
     p.add_argument("--num_trials", type=int, default=10)
     p.add_argument("--fast", action="store_true", help="small particles/steps/epochs for quick debugging")
     p.add_argument("--out_dir", type=str, default=None, help="override log_path")
+    # multi-origin short-rollout optimisation (all optional; defaults reproduce stock MC-PILCO)
+    p.add_argument("--optim_horizon", type=int, default=None,
+                   help="cap the imagined GP-rollout to this many steps during policy optimisation")
+    p.add_argument("--num_anchor_batches", type=int, default=0,
+                   help="pure-recipe batches to launch short rollouts from (0 = disabled)")
+    p.add_argument("--num_anchors", type=int, default=12, help="anchor launch states spread across the batch")
+    p.add_argument("--anchor_var", type=float, default=0.01, help="per-anchor particle-init variance")
     args = p.parse_args()
-    main(args.seed, args.num_trials, args.fast, args.out_dir)
+    main(args.seed, args.num_trials, args.fast, args.out_dir,
+         args.optim_horizon, args.num_anchor_batches, args.num_anchors, args.anchor_var)
