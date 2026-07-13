@@ -31,11 +31,22 @@ STATE_NAMES = ["T", "DO2", "O2", "CO2outgas", "pH", "Wt", "PAA", "X", "P", "time
 STATE_DIM = len(STATE_NAMES)
 ACTION_DIM = 1
 
-# WARMUP_H = 100.0 # recipe-only warmup; agent acts after
-WARMUP_H = 0.2 # recipe-only warmup; agent acts after
+# Recipe drives every feed (incl. Fs) until WARMUP_H; the RL agent's Fs residual
+# takes over only after. Set to 120 h so the recipe handles startup/growth and the
+# agent controls the production phase (120-230 h) -- see INIT_STATE_PHYS below.
+# WARMUP_H = 120.0 # recipe-only warmup; agent acts after
+WARMUP_H = 0 # recipe-only warmup; agent acts after
 T_SAMPLING = 2.0 # h between actions
 STEPS_PER_DECISION = int(round(T_SAMPLING / STEP_IN_HOURS))
-CONTROL_H = 230.0 - WARMUP_H
+
+# The handover state is read from the batch buffer at index k_warm-1, so the simulator must have
+# taken at least ONE step by then. k_warm=0 reads an unpopulated buffer -> an all-zero "reactor"
+# (X=0, DO2=0, and pH=12 because -log10(1e-12)), which poisons states[0] of every episode and the
+# GP with it. Enforce a minimum of one native step of recipe warmup; at WARMUP_H=0 this concedes
+# only the first 0.2 h to the recipe, so it is still effectively full-batch control.
+K_WARM = max(1, int(round(WARMUP_H / STEP_IN_HOURS)))
+WARMUP_H_EFF = K_WARM * STEP_IN_HOURS   # warmup actually applied (>= STEP_IN_HOURS)
+CONTROL_H = 230.0 - WARMUP_H_EFF
 
 FPAA_MIN, FPAA_MAX = 0.0, 15.0
 # RL now drives Fs (sugar) as a RESIDUAL on the recipe: Fs = recipe_Fs(t) * (1 + FS_SCALE * a),
@@ -64,13 +75,13 @@ STATE_RANGES = {
     "P":         (0.0,   60.0),
     "time":      (0.0,   230.0),
 }
-# warmed-up physical state at t=WARMUP_H (default recipe);
-# PAA conc is held ~1200 mg/L by the recipe PID through warmup.
-# INIT_STATE_PHYS = {"T": 298.0, "DO2": 15.1, "O2": 0.19, "CO2outgas": 1.67,
-                #    "pH": 6.51, "Wt": 1.014e5, "PAA": 1200.0, "P": 13.04}
-# TODO: where these initial values come from????
-INIT_STATE_PHYS = {"T": 297.65, "DO2": 14.74, "O2": 0.22, "CO2outgas": 0.09,
-                   "pH": 6.44, "Wt": 61980.0, "PAA": 1422.0, "X": 0.49, "P": 0.01,
+# Warmed-up physical state at t=WARMUP_H=120 h under the default recipe.
+# Measured as the mean over 6 recipe batches (seeds 0-5) of the state at native
+# index k_warm-1=599 -- i.e. exactly what extract_state(bx, k_warm) sees at handover.
+# PAA is held ~1200 mg/L by the recipe PID; biomass/product/weight have grown into the
+# production regime (X~23 g/L, P~17 g/L, Wt~98 t) -- unlike the near-inoculation 0.2 h state.
+INIT_STATE_PHYS = {"T": 297.98, "DO2": 12.33, "O2": 0.189, "CO2outgas": 1.86,
+                   "pH": 6.49, "Wt": 97907.0, "PAA": 1200.0, "X": 22.80, "P": 16.73,
                    "time": WARMUP_H}
 
 
@@ -109,9 +120,42 @@ def extract_state(batch_x, k):
     return np.array([_normalise(_read(batch_x, n, i), *STATE_RANGES[n]) for n in STATE_NAMES])
 
 
+_INIT_CACHE_DIR = ROOT / "pensim_mcpilco" / "results" / "_init_state_cache"
+_init_state_cache = {}
+
+
+def _measure_init_state_norm(num_batches=6):
+    """Normalised handover state (x0), MEASURED by rolling pure-recipe batches up to K_WARM.
+
+    Derived from WARMUP_H so it can never go stale. (INIT_STATE_PHYS below is a hard-coded snapshot
+    that was measured for WARMUP_H=120; it silently became wrong the moment WARMUP_H changed, which
+    made policy optimisation launch its imagined rollouts from a fully-grown reactor while the real
+    batch started at inoculation.) Cached in-process and on disk, keyed by K_WARM.
+    """
+    if K_WARM in _init_state_cache:
+        return _init_state_cache[K_WARM]
+
+    f = _INIT_CACHE_DIR / f"x0_kwarm{K_WARM}.npy"
+    if f.exists():
+        x0 = np.load(f)
+    else:
+        recipe_policy = lambda state, decision_idx: np.array([0.0])   # a=0 -> recipe Fs
+        fresh = PenSimWrapper(seed_offset=0)
+        np_state = np.random.get_state()   # rollout(seed=...) reseeds numpy; don't disturb the run
+        # rollout() sets states[0] = extract_state(bx, K_WARM) -- exactly the handover state
+        x0 = np.mean([fresh.rollout(s0=None, policy=recipe_policy, T=CONTROL_H, dt=T_SAMPLING,
+                                    noise=None, seed=i)[0][0] for i in range(num_batches)], axis=0)
+        np.random.set_state(np_state)
+        _INIT_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        np.save(f, x0)
+
+    _init_state_cache[K_WARM] = x0
+    return x0
+
+
 def initial_state_norm():
-    """Normalised state at the WARMUP_H turn-on point (RL phase x0)."""
-    return np.array([_normalise(INIT_STATE_PHYS[n], *STATE_RANGES[n]) for n in STATE_NAMES])
+    """Normalised state at the WARMUP_H turn-on point (RL phase x0), measured from the recipe."""
+    return _measure_init_state_norm()
 
 
 # ------------------ SYSTEM WRAPPER ------------------
@@ -150,7 +194,7 @@ class PenSimWrapper:
         _, bx = env.reset()
 
         spd = STEPS_PER_DECISION
-        k_warm = int(round(WARMUP_H / STEP_IN_HOURS))
+        k_warm = K_WARM   # >= 1, so extract_state(bx, k_warm) always reads a stepped buffer
         n_decisions = int(T / dt) # =114
         states = np.zeros((n_decisions + 1, STATE_DIM))
         inputs = np.zeros((n_decisions + 1, ACTION_DIM))
@@ -235,7 +279,7 @@ class PenSimWrapper:
 
 class PenSimMCPILCO(MCP.MC_PILCO):
 
-    def __init__(self, pensim_wrapper, optim_horizon_steps=None, **kwargs):
+    def __init__(self, pensim_wrapper, optim_horizon_steps=None, exploration_noise_std=0.4, **kwargs):
 
         # mcpilco engine wants an ODE fn
         kwargs.setdefault("f_sim", lambda x, t, u: x)
@@ -243,6 +287,9 @@ class PenSimMCPILCO(MCP.MC_PILCO):
 
         # swap ODE -> PenSimPy
         self.system = pensim_wrapper
+
+        # width of the exploration Fs-corrections around the recipe (used by get_data_from_system)
+        self.exploration_noise_std = exploration_noise_std
 
         # Multi-origin short-rollout optimisation. Defaults -> disabled == stock MC-PILCO.
         # optim_horizon_steps caps the IMAGINED GP-rollout length during policy optimisation
@@ -269,7 +316,7 @@ class PenSimMCPILCO(MCP.MC_PILCO):
         #     self.std_meas_noise,
         # )
         if flg_exploration:
-            np_policy = self._recipe_exploration_policy() # perturbed recipe schedule
+            np_policy = self._recipe_exploration_policy(noise_std=self.exploration_noise_std) # perturbed recipe schedule
         else:
             np_policy = self.control_policy.get_np_policy()
         states, inputs, noiseless = self.system.rollout(

@@ -2,7 +2,9 @@
  PYTHONPATH=.. python -m experiments.02_mcpilco_single_phase --seed 1 --num_trials 5 --fast
 """
 import argparse
+import datetime
 import pickle
+import pprint
 from pathlib import Path
 
 import os as _os, sys as _sys
@@ -24,14 +26,32 @@ def _next_run_dir(seed):
     return str(_RESULTS_ROOT / f"seed{seed}_{n}")
 
 
+def _write_note(log_path, run_params, cfg):
+    """Dump the parameters used for this run to a note.txt."""
+    lines = [
+        f"run timestamp : {datetime.datetime.now().isoformat(timespec='seconds')}",
+        "",
+        "== run parameters ==",
+    ]
+    lines += [f"{k} = {v}" for k, v in run_params.items()]
+    lines += ["", "== resolved config =="]
+    lines.append(pprint.pformat(cfg, width=100, sort_dicts=False))
+    (Path(log_path) / "note.txt").write_text("\n".join(lines) + "\n")
+
+
 def main(seed=1, num_trials=10, fast=False, out_dir=None,
-         optim_horizon=None, num_anchor_batches=0, num_anchors=12, anchor_var=0.01):
+         optim_horizon=None, num_anchor_batches=0, num_anchors=None, anchor_var=0.01):
     cfg = get_config(seed=seed, num_trials=num_trials, fast=fast,
                      optim_horizon_steps=optim_horizon, num_anchor_batches=num_anchor_batches,
                      num_anchors=num_anchors, anchor_var=anchor_var)
     log_path = out_dir if out_dir is not None else _next_run_dir(seed)
     cfg["mc_pilco_init"]["log_path"] = log_path
     Path(log_path).mkdir(parents=True, exist_ok=True)
+
+    run_params = {"seed": seed, "num_trials": num_trials, "fast": fast, "out_dir": out_dir,
+                  "optim_horizon": optim_horizon, "num_anchor_batches": num_anchor_batches,
+                  "num_anchors": num_anchors, "anchor_var": anchor_var}
+    _write_note(log_path, run_params, cfg)
 
     wrapper = PenSimWrapper(**cfg["wrapper_par"])
     agent = PenSimMCPILCO(pensim_wrapper=wrapper, **cfg["mc_pilco_init"])
@@ -56,7 +76,7 @@ if __name__ == "__main__":
                    help="cap the imagined GP-rollout to this many steps during policy optimisation")
     p.add_argument("--num_anchor_batches", type=int, default=0,
                    help="pure-recipe batches to launch short rollouts from (0 = disabled)")
-    p.add_argument("--num_anchors", type=int, default=12, help="anchor launch states spread across the batch")
+    p.add_argument("--num_anchors", type=int, default=None, help="anchor launch states spread across the batch")
     p.add_argument("--anchor_var", type=float, default=0.01, help="per-anchor particle-init variance")
     args = p.parse_args()
     main(args.seed, args.num_trials, args.fast, args.out_dir,
