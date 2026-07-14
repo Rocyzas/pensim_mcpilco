@@ -71,7 +71,7 @@ STATE_RANGES = {
     "Wt":        (5.0e4, 1.3e5),
     "PAA":       (600,   1800.0),
      # biomass g/L (recipe reaches ~20); ground-truth state, not an online sensor
-    "X":         (0.0,   25.0),
+    "X":         (0.0,   40.0),
     "P":         (0.0,   60.0),
     "time":      (0.0,   230.0),
 }
@@ -120,34 +120,33 @@ def extract_state(batch_x, k):
     return np.array([_normalise(_read(batch_x, n, i), *STATE_RANGES[n]) for n in STATE_NAMES])
 
 
-_INIT_CACHE_DIR = ROOT / "pensim_mcpilco" / "results" / "_init_state_cache"
-_init_state_cache = {}
+_init_state_cache = {}   # in-process memo ONLY -- deliberately NOT persisted to disk (see below)
 
 
 def _measure_init_state_norm(num_batches=6):
     """Normalised handover state (x0), MEASURED by rolling pure-recipe batches up to K_WARM.
 
-    Derived from WARMUP_H so it can never go stale. (INIT_STATE_PHYS below is a hard-coded snapshot
-    that was measured for WARMUP_H=120; it silently became wrong the moment WARMUP_H changed, which
-    made policy optimisation launch its imagined rollouts from a fully-grown reactor while the real
-    batch started at inoculation.) Cached in-process and on disk, keyed by K_WARM.
+    Derived from the live WARMUP_H / STATE_RANGES so it can never go stale. (INIT_STATE_PHYS below is
+    a hard-coded snapshot taken for WARMUP_H=120; it silently became wrong the moment WARMUP_H changed,
+    which made policy optimisation launch its imagined rollouts from a fully-grown reactor while the
+    real batch started at inoculation.)
+
+    NOT CACHED ON DISK, on purpose. A previous version wrote results/_init_state_cache/x0_kwarm{K}.npy
+    keyed only by K_WARM -- so editing STATE_RANGES (x0 is stored NORMALISED) silently reused a stale
+    x0. Nothing in the training path may depend on anything under results/: those artefacts carry the
+    STATE_RANGES / WARMUP_H / code version of whenever they happened to be written. Measuring fresh
+    costs `num_batches` recipe rollouts once per process, memoised below.
     """
     if K_WARM in _init_state_cache:
         return _init_state_cache[K_WARM]
 
-    f = _INIT_CACHE_DIR / f"x0_kwarm{K_WARM}.npy"
-    if f.exists():
-        x0 = np.load(f)
-    else:
-        recipe_policy = lambda state, decision_idx: np.array([0.0])   # a=0 -> recipe Fs
-        fresh = PenSimWrapper(seed_offset=0)
-        np_state = np.random.get_state()   # rollout(seed=...) reseeds numpy; don't disturb the run
-        # rollout() sets states[0] = extract_state(bx, K_WARM) -- exactly the handover state
-        x0 = np.mean([fresh.rollout(s0=None, policy=recipe_policy, T=CONTROL_H, dt=T_SAMPLING,
-                                    noise=None, seed=i)[0][0] for i in range(num_batches)], axis=0)
-        np.random.set_state(np_state)
-        _INIT_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-        np.save(f, x0)
+    recipe_policy = lambda state, decision_idx: np.array([0.0])   # a=0 -> recipe Fs
+    fresh = PenSimWrapper(seed_offset=0)
+    np_state = np.random.get_state()   # rollout(seed=...) reseeds numpy; don't disturb the run
+    # rollout() sets states[0] = extract_state(bx, K_WARM) -- exactly the handover state
+    x0 = np.mean([fresh.rollout(s0=None, policy=recipe_policy, T=CONTROL_H, dt=T_SAMPLING,
+                                noise=None, seed=i)[0][0] for i in range(num_batches)], axis=0)
+    np.random.set_state(np_state)
 
     _init_state_cache[K_WARM] = x0
     return x0
@@ -279,7 +278,7 @@ class PenSimWrapper:
 
 class PenSimMCPILCO(MCP.MC_PILCO):
 
-    def __init__(self, pensim_wrapper, optim_horizon_steps=None, exploration_noise_std=0.4, **kwargs):
+    def __init__(self, pensim_wrapper, optim_horizon_steps=None, **kwargs):
 
         # mcpilco engine wants an ODE fn
         kwargs.setdefault("f_sim", lambda x, t, u: x)
@@ -287,9 +286,6 @@ class PenSimMCPILCO(MCP.MC_PILCO):
 
         # swap ODE -> PenSimPy
         self.system = pensim_wrapper
-
-        # width of the exploration Fs-corrections around the recipe (used by get_data_from_system)
-        self.exploration_noise_std = exploration_noise_std
 
         # Multi-origin short-rollout optimisation. Defaults -> disabled == stock MC-PILCO.
         # optim_horizon_steps caps the IMAGINED GP-rollout length during policy optimisation
@@ -316,7 +312,7 @@ class PenSimMCPILCO(MCP.MC_PILCO):
         #     self.std_meas_noise,
         # )
         if flg_exploration:
-            np_policy = self._recipe_exploration_policy(noise_std=self.exploration_noise_std) # perturbed recipe schedule
+            np_policy = self._recipe_exploration_policy() # perturbed recipe schedule
         else:
             np_policy = self.control_policy.get_np_policy()
         states, inputs, noiseless = self.system.rollout(

@@ -14,22 +14,21 @@ import model_learning.Model_learning as ML
 import policy_learning.Policy as Policy
 
 from mcpilco.penicillin_cost import PeniConcentrationCost
-from mcpilco.pensim_wrapper import (STATE_DIM, 
-                                    ACTION_DIM, 
-                                    T_SAMPLING, 
+from mcpilco.pensim_wrapper import (STATE_DIM,
+                                    ACTION_DIM,
+                                    T_SAMPLING,
                                     CONTROL_H,
                                     initial_state_norm)
 
 
 def get_config(seed=1, num_trials=10, fast=False, dtype=torch.float64, device=torch.device("cpu"),
-               optim_horizon_steps=None, num_anchor_batches=0, num_anchors=12, anchor_var=0.01,
-               num_explorations=5, exploration_noise_std=0.4):
+               optim_horizon_steps=None, num_anchor_batches=0, num_anchors=12, anchor_var=0.01):
     # For Policy's initial centers/weioghts, and MCPILCO particle sampling/dropout
     torch.manual_seed(seed)
     np.random.seed(seed)
 
-    # initial exploration perturbed-recipe batches before the trial loop (count + noise width both
-    # tunable: count densifies data, exploration_noise_std widens the Fs coverage around the recipe)
+    # initial exploration perturbed-recipe batches before the trial loop
+    num_explorations = 5
 
     # fast debug mode
     n_particles = 20 if fast else 100
@@ -41,22 +40,30 @@ def get_config(seed=1, num_trials=10, fast=False, dtype=torch.float64, device=to
     gp_input_dim = STATE_DIM + ACTION_DIM
     num_gp = STATE_DIM # one GP per state dim
 
-    # GP dynamics model (one RBF GP per state dim)
+    # GP dynamics model (one RBF GP per state dim), ONE SHARED init dict for all of them.
+    #
+    # A per-channel init (lambda/sigma_n/jitter scaled to each channel's measured delta std) was
+    # tried and REVERTED: it improved the model (held-out R^2 up on every channel) but COLLAPSED the
+    # policy -- in full mode the controller saturated to a constant a=-1 (action std exactly 0), i.e.
+    # it stopped being a state-feedback controller at all. Isolated against this shared init on the
+    # same seed: shared -> 0% floored, action std 0.055; per-GP -> 100% floored, action std 0.000000.
+    # (Fast mode's 150 opt-steps never reached tanh saturation, so an earlier fast A/B missed it.)
+    # Do NOT reintroduce without: measuring scales on demand from FRESH recipe batches (never from
+    # results/), changing ONE knob at a time, and A/B-ing in FULL mode.
     init_dict_RBF = {
         "active_dims": np.arange(0, gp_input_dim),
         "lengthscales_init": np.ones(gp_input_dim),
         "flg_train_lengthscales": True,
         "lambda_init": np.ones(1),
         "flg_train_lambda": True,
-        # delta P std=0.004, so making it smaller not to let noise to dominate.
         "sigma_n_init": 0.01 * np.ones(1),
         "flg_train_sigma_n": True,
-        #extra jitter so near constantn tightly controlled (T, pH),
-        # don't make the predictive std underflow.
+        # numerical jitter; keeps the predictive std from underflowing on near-constant channels
         "sigma_n_num": 1e-3,
         "dtype": dtype,
         "device": device,
     }
+
     model_learning_par = {
         "num_gp": num_gp,
         "init_dict_list": [init_dict_RBF] * num_gp,
@@ -97,17 +104,12 @@ def get_config(seed=1, num_trials=10, fast=False, dtype=torch.float64, device=to
         "control_policy_par": control_policy_par,
         "f_cost_function": PeniConcentrationCost,
 
-        # Dead-end knobs left inert (both 0.0): action_penalty = recipe anchor, beta_cost_std =
-        # pessimism (mean+beta*std). Probing showed the cost already prefers the recipe (its optimum
-        # over a held action is a=0), and the GP's variance is far too small for pessimism to bite.
-        # Neither fixed the feed-flooring; see SUPERVISOR_REVIEW.md.
-        "cost_function_par": {"p_weight": 0.05, "soft_penalty": 0.5, "paa_penalty": 10, "do2_penalty": 5.0, "rate_penalty": 0.5, "action_penalty": 0.0, "beta_cost_std": 0.0},
+        "cost_function_par": {"p_weight": 0.05, "soft_penalty": 0.5, "paa_penalty": 10, "do2_penalty": 5.0, "rate_penalty": 0.5},
         "std_meas_noise": 0.01 * np.ones(STATE_DIM),
         "log_path": f"results/single_phase/seed{seed}",
-        # cap the imagined GP-rollout horizon during policy optimisation (None -> stock full 114)
+        # cap the imagined GP-rollout horizon during policy optimisation (None -> stock full horizon;
+        # inert when None -- PenSimMCPILCO.apply_policy short-circuits on it)
         "optim_horizon_steps": optim_horizon_steps,
-        # Gaussian std of the exploration Fs-corrections around the recipe (coverage width)
-        "exploration_noise_std": exploration_noise_std,
         "dtype": dtype, "device": device,
     }
 

@@ -76,7 +76,8 @@ if __name__ == "__main__":
                    help="cap the imagined GP-rollout to this many steps during policy optimisation")
     p.add_argument("--num_anchor_batches", type=int, default=0,
                    help="pure-recipe batches to launch short rollouts from (0 = disabled)")
-    p.add_argument("--num_anchors", type=int, default=None, help="anchor launch states spread across the batch")
+    # must stay an int: it reaches setup_recipe_anchors(), which subsamples with it (None -> crash)
+    p.add_argument("--num_anchors", type=int, default=12, help="anchor launch states spread across the batch")
     p.add_argument("--anchor_var", type=float, default=0.01, help="per-anchor particle-init variance")
     args = p.parse_args()
     main(args.seed, args.num_trials, args.fast, args.out_dir,
