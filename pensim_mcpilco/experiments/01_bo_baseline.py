@@ -95,7 +95,7 @@ def run(n_calls=1000, n_random=10, base_seed=0, seed_mode="fixed"):
     # not the multi-seed mean 3485). In "vary" mode keep the multi-seed mean.
     if seed_mode == "fixed":
         baseline_yield, _ = _evaluate([1.0] * len(SCALED), seed=base_seed)
-        baseline_label = f"default recipe @ seed {base_seed}"
+        baseline_label = f"default recipe on seed {base_seed}"
     else:
         baseline_yield = RECIPE_MULTISEED_MEAN
         baseline_label = "recipe baseline (multi-seed mean)"
@@ -139,6 +139,7 @@ def run(n_calls=1000, n_random=10, base_seed=0, seed_mode="fixed"):
     fig, ax = plt.subplots(figsize=(9, 5))
     ax.scatter(range(1, len(yields) + 1), yields, s=30, alpha=.6, label="batch yield")
     ax.plot(range(1, len(best_so_far) + 1), best_so_far, color="darkorange", lw=2, label="best so far")
+    ax.plot(range(1, len(yields)+1), np.cumsum(yields)/np.arange(1, len(yields)+1), color="darkgreen", lw=2, label="average so far")
     ax.axhline(baseline_yield, color="crimson", ls="--",
                label=f"{baseline_label} ({baseline_yield:.0f})")
     ax.set_xlabel("Function evaluation")
