@@ -16,11 +16,18 @@ WT_IDX = STATE_NAMES.index("Wt")
 PAA_IDX = STATE_NAMES.index("PAA")
 DO2_IDX = STATE_NAMES.index("DO2")
 
+# Physical ceilings for the reward-relevant decoded channels, taken from the model's own declared
+# domain (STATE_RANGES upper bound, decoded out of log space). The rollout is already clamped to
+# [-1, 1] in Model_learning_RBF_det_time, which bounds these; clamping again here is defence in
+# depth so the cost can never read an impossible P/Wt (and thus never explode) even if a caller
+# rolls an unclamped model. P: exp(log 40) = 40 g/L, Wt: exp(log 1.3e5) = 1.3e5 L.
+P_MAX = float(decode_state_value("P", STATE_RANGES["P"][1]))
+WT_MAX = float(decode_state_value("Wt", STATE_RANGES["Wt"][1]))
+
 
 class PeniConcentrationCost(CF.Expected_cost):
-    def __init__(self, p_weight=0.05, soft_penalty=0.5, paa_penalty=100.0,
-                 do2_penalty=5.0, rate_penalty=0.5):
-        self.p_weight = p_weight
+    def __init__(self, p_weight=None, soft_penalty=None, paa_penalty=None,
+                 do2_penalty=None, rate_penalty=None):
         self.soft_penalty = soft_penalty
         self.paa_penalty = paa_penalty
         self.do2_penalty = do2_penalty
@@ -40,6 +47,11 @@ class PeniConcentrationCost(CF.Expected_cost):
     def _cost(self, states_sequence, inputs_sequence, trial_index=None):
         P = decode_state_value("P", self._dn(states_sequence[:, :, P_IDX], *STATE_RANGES["P"]))
         Wt = decode_state_value("Wt", self._dn(states_sequence[:, :, WT_IDX], *STATE_RANGES["Wt"]))
+        # Cap the decoded quantities at their physical ceiling so an off-distribution GP prediction
+        # cannot inflate the mass reward (P * Wt) to an impossible magnitude. No-op in the normal
+        # operating range (P ~ 0-40 g/L); only bites the hallucinated tail.
+        P = torch.clamp(P, min=0.0, max=P_MAX)
+        Wt = torch.clamp(Wt, min=0.0, max=WT_MAX)
         PAA = self._dn(states_sequence[:, :, PAA_IDX], *STATE_RANGES["PAA"])
         DO2 = self._dn(states_sequence[:, :, DO2_IDX], *STATE_RANGES["DO2"])
 
