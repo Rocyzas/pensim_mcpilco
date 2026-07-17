@@ -28,6 +28,7 @@ WT_MAX = float(decode_state_value("Wt", STATE_RANGES["Wt"][1]))
 class PeniConcentrationCost(CF.Expected_cost):
     def __init__(self, p_weight=None, soft_penalty=None, paa_penalty=None,
                  do2_penalty=None, rate_penalty=None):
+        self.p_weight = p_weight
         self.soft_penalty = soft_penalty
         self.paa_penalty = paa_penalty
         self.do2_penalty = do2_penalty
