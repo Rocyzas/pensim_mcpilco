@@ -19,17 +19,25 @@ from mcpilco.pensim_wrapper import PAA_BAND, VISC_MAX, WT_OVERFLOW
 _DISCH = Recipe(DISCHARGE_DEFAULT_PROFILE, DISCHARGE)
 
 
-def yield_kg(mon):
+def yield_kg(mon, strict=False):
     """Total penicillin yield (kg) for a batch.
 
     Preferred: sum the per-step `yield_per_run` captured from PenSimEnv.step -- this is
     exactly PenSimPy's `batch_yield`, identical to what the recipe (00) and BO (01)
     baselines report via env.get_batches, so all comparisons are commensurable.
 
-    Legacy fallback (pre-fix monitors without `yield_per_run`): approximate from P/Wt.
+    Legacy fallback (pre-fix monitors without `yield_per_run`): approximate from P/Wt. This is a
+    DIFFERENT estimator, so mixing it with the preferred one across arms of the same comparison
+    would be silently incomparable -- set `strict=True` (or PENSIM_STRICT_YIELD=1) to make the
+    fallback raise instead of quietly changing metric under you.
     """
     if "yield_per_run" in mon:
         return float(np.sum(mon["yield_per_run"]))
+    if strict or _os.environ.get("PENSIM_STRICT_YIELD") == "1":
+        raise KeyError(
+            "monitor has no 'yield_per_run': would fall back to the legacy P/Wt estimator, which is "
+            "NOT comparable with the primary metric. Re-collect the monitor, or pass strict=False."
+        )
     P, V, t = mon["P"], mon["Wt"], mon["t"]
     Fdis = np.array([_DISCH.get_value_at(float(tt)) for tt in t])
     net = (P[-1] * V[-1] - P[0] * V[0]) / 1000.0

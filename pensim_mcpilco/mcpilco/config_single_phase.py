@@ -27,7 +27,8 @@ from mcpilco.pensim_wrapper import (STATE_DIM,
 
 
 def get_config(seed=1, num_trials=10, fast=False, dtype=torch.float64, device=torch.device("cpu"),
-               optim_horizon_steps=None, num_anchor_batches=0, num_anchors=12, anchor_var=0.01):
+               optim_horizon_steps=None, num_anchor_batches=0, num_anchors=12, anchor_var=0.01,
+               risk_weight=0.0, visc_penalty=0.5, harvest_reward=True):
     torch.manual_seed(seed)
     np.random.seed(seed)
 
@@ -102,7 +103,15 @@ def get_config(seed=1, num_trials=10, fast=False, dtype=torch.float64, device=to
         "control_policy_par": control_policy_par,
         "f_cost_function": PeniConcentrationCost,
 
-        "cost_function_par": {"p_weight": 0.05, "soft_penalty": 0.5, "paa_penalty": 10, "do2_penalty": 5.0, "rate_penalty": 0.5},
+        # risk_weight scales the across-particle std IN THE OPTIMISED OBJECTIVE (0.0 = stock
+        # risk-neutral mean). The std runs ~25x the mean cost here, so useful values are small:
+        # ~0.005-0.02 makes the penalty roughly 20% of the objective; >=0.1 swamps the yield signal.
+        # visc_penalty guards the observed collapse mode (broth thickens -> O2 transfer fails ->
+        # product degrades); harvest_reward credits penicillin removed by the discharge pulses, which
+        # the in-tank-only reward discarded (~20% of batch_yield_kg).
+        "cost_function_par": {"p_weight": 0.05, "soft_penalty": 0.5, "rate_penalty": 0.5,
+                              "risk_weight": risk_weight, "visc_penalty": visc_penalty,
+                              "harvest_reward": harvest_reward},
         # CHANGED_THIS
         "std_meas_noise": std_meas_noise,
         "log_path": f"results/single_phase/seed{seed}",

@@ -23,10 +23,22 @@ from PenSimPy.pensimpy.data.constants import (
 from utils.ode_patch import patch_fastodeint
 patch_fastodeint()
 
-STATE_NAMES = ["T", "DO2", "O2", "CO2outgas", "pH", "Wt", "PAA", "X", "P", "time"]
+# Minimal RL state: agent-relevant channels only. T, pH, O2, CO2outgas, PAA are PID/recipe-held
+# (the agent neither drives nor needs them as feedback), so they are dropped from the observed state.
+# `time` stays as the deterministic clock (see TIME_IDX). STATE_RANGES below is kept as a superset
+# lookup table; only the channels named here are actually modelled/observed/conditioned on.
+#
+# `Viscosity` is here because it is the observed FAILURE MODE. Measured over 8 held-out batches of a
+# trained policy, every batch peaking below ~111 cP yielded >=2678 kg while the two peaking at 158
+# and 164 cP collapsed to ~1000 kg (and a training episode at 184 cP gave 606 kg) -- sustained feed
+# thickens the broth, oxygen transfer fails, and penicillin DEGRADES instead of accumulating.
+# Without this channel the GP cannot represent that mechanism, the policy cannot react to it, and no
+# risk term can price it: the failure is literally invisible to every part of the agent.
+STATE_NAMES = ["Wt", "X", "P", "Viscosity", "time"]
 STATE_DIM = len(STATE_NAMES)
 ACTION_DIM = 1
 
+# STATE_LOG_CHANNELS = {"S", "Wt", "X", "P"}
 STATE_LOG_CHANNELS = {"Wt", "X", "P"}
 STATE_LOG_FLOOR = 1e-6
 
@@ -41,21 +53,33 @@ CONTROL_H = 230.0 - WARMUP_H_EFF
 FPAA_MIN, FPAA_MAX = 0.0, 15.0
 
 # 1 = 100%
-FS_SCALE = 1
-DO2_FLOOR = 5.0
+# making FS 50% because the initial explorations are 10%, so policy going outside the exploration is risky,
+# as there is no data behind them.
+# Also, it would be sensible to compare it with the BO baselines in this way.
+FS_SCALE = 0.5
 
 
 STATE_RANGES = {
 
     "T":         (296.0, 302.0),
-    "DO2":       (0.0,   30.0),
     "O2":        (0.15,  0.25),
     "CO2outgas": (0.0,   4.0),
     "pH":        (5.5,   7.5),
     "Wt":        (np.log(5.0e4), np.log(1.3e5)),
     "PAA":       (600,   1800.0),
+    # Substrate: fed-batch keeps it near zero (median ~1.6e-3 g/L) but it SPIKES to ~14 g/L under
+    # overfeeding -- ~5 orders of magnitude, so it is log-encoded (a linear band would pin the whole
+    # operating range at z=-1). The spike is the substrate-accumulation warning that precedes a crash.
+    # "S":         (np.log(STATE_LOG_FLOOR), np.log(20.0)),
+    # "S":         (0, 5),
     "X":         (np.log(STATE_LOG_FLOOR), np.log(40.0)),
     "P":         (np.log(STATE_LOG_FLOOR), np.log(40.0)),
+    # Measured over 619 logged batches: min 4.1, median 49.5, p99 142.6, max 188.8 cP. Linear, NOT
+    # log-encoded -- the span is only ~46x (so a single RBF lengthscale copes), the decision-relevant
+    # region is the 100-190 top end where linear gives the better resolution, and staying off the
+    # exp() decode path keeps this channel out of the rollout blow-up mode that {Wt,X,P} needed
+    # clamping for. Upper bound 200 leaves headroom above the worst observed batch.
+    "Viscosity": (0.0,   200.0),
     "time":      (0.0,   230.0),
 }
 
@@ -75,11 +99,17 @@ INIT_STATE_PHYS = {"T": 297.98, "DO2": 12.33, "O2": 0.189, "CO2outgas": 1.86,
                    "time": WARMUP_H}
 
 
-WT_SOFT = (7.0e4, 1.1e5) 
+WT_SOFT = (7.0e4, 1.1e5)
 WT_OVERFLOW = 1.2e5
 P_CRASH = 55.0
 PAA_BAND = (800.0, 1600.0)
-VISC_MAX = 100.0 
+VISC_MAX = 100.0
+
+# Exploration screening: a batch whose total penicillin yield lands below FAILED_YIELD_KG has
+# collapsed. Such batches are discarded and re-rolled rather than fed to the GPs, so the initial
+# model is not built on failed batches (see PenSimMCPILCO.get_data_from_system).
+FAILED_YIELD_KG = 2000.0
+MAX_EXPLORATION_RETRIES = 20 
 
 
 def _normalise(value, lo, hi):
@@ -102,6 +132,15 @@ def decode_state_value(name, value):
             return torch.exp(value)
         return np.exp(value)
     return value
+
+
+def batch_yield_kg(mon):
+    """Total penicillin yield (kg) of one batch, from its monitor dict.
+
+    Sums the per-step `yield_per_run` captured from PenSimEnv.step -- exactly PenSimPy's
+    `batch_yield`, so it is the same number the recipe/BO baselines and eval_utils.yield_kg report.
+    """
+    return float(np.sum(mon["yield_per_run"]))
 
 
 def _read(batch_x, name, i):
@@ -266,19 +305,10 @@ class PenSimMCPILCO(MCP.MC_PILCO):
         self._anchor_states = None
         self._anchor_vars = None
 
-    def _recipe_exploration_policy(self, seg_len=10, n_seg=12):
-        """Correlated, band-FILLING exploration (coupled with the FS_SCALE clamp).
-
-        Each episode is a random-order sweep of EVENLY-SPACED residual levels across the full band,
-        each held for `seg_len` decisions. Two reasons, both needed for the clamp to work (see the
-        clamp_alone_insufficient finding):
-          - the stratified levels linspace(-1,1) GUARANTEE both EDGES (a=+/-1 => Fs*(1+/-FS_SCALE))
-            are covered every episode. The old i.i.d. a~N(0,0.4) piled up near a=0 and undersampled the
-            edges, so the GP extrapolated/hallucinated at the +feed edge and repelled the policy to the
-            -bound; even i.i.d. U(-1,1) left the +edge at ~4%.
-          - holding a level for a stretch gives the GP data under SUSTAINED feed -> the STATE trajectory
-            visits where a sustained policy would drive it (state coverage), not i.i.d. noise that never
-            leaves the recipe tube. Small jitter keeps inputs varied across episodes."""
+    # n_seg is distinct feed levels the episode uses, spread evenly across the [-1, 1] range.
+    # This segments the action into n_seg segments, each with length 4 decisions.
+    # for T_Sampling=5h, there are 46 decisions per batch.
+    def _recipe_exploration_policy(self, seg_len=4, n_seg=12):
         levels = np.linspace(-1.0, 1.0, n_seg) + np.random.uniform(-0.08, 0.08, n_seg)
         levels = np.clip(levels, -1.0, 1.0)
         np.random.shuffle(levels)
@@ -289,14 +319,45 @@ class PenSimMCPILCO(MCP.MC_PILCO):
 
     def get_data_from_system(self, initial_state, T_exploration,
                              trial_index, flg_exploration=False):
-        if flg_exploration:
-            np_policy = self._recipe_exploration_policy()
-        else:
-            np_policy = self.control_policy.get_np_policy()
-        states, inputs, noiseless = self.system.rollout(
-            initial_state, np_policy, T_exploration, self.T_sampling,
-            self.std_meas_noise,
-        )
+        # EXPLORATION batches are screened: one whose yield lands below FAILED_YIELD_KG has collapsed,
+        # and feeding it to the GPs poisons the initial model. Re-draw the exploration policy and roll
+        # again until a batch clears the bar, so the `num_explorations` batches that seed the model are
+        # all non-failed. Only exploration is screened -- POLICY batches are always kept however they
+        # turn out, or the learning loop would be blind to its own failures.
+        for attempt in range(1, MAX_EXPLORATION_RETRIES + 1):
+            if flg_exploration:
+                np_policy = self._recipe_exploration_policy()
+            else:
+                np_policy = self.control_policy.get_np_policy()
+
+            # No `seed` here on purpose: rollout then draws its realisation from
+            # `_episode + seed_offset`, so every episode gets fresh initial conditions and batch
+            # parameters (alpha_kla, PAA_c, N_conc_paa). A fixed realisation made successive
+            # on-policy batches near-duplicates once the policy converged -- the GP gained no new
+            # information from them while its noise term kept shrinking. seed_offset = seed * 1000
+            # (config_single_phase) keeps different config seeds from colliding.
+            states, inputs, noiseless = self.system.rollout(
+                initial_state, np_policy, T_exploration, self.T_sampling,
+                self.std_meas_noise
+            )
+
+            if not flg_exploration:
+                break
+            y = batch_yield_kg(self.system.monitor[-1])
+            if y >= FAILED_YIELD_KG:
+                if attempt > 1:
+                    print(f"[exploration] accepted on attempt {attempt} (yield {y:.0f} kg)")
+                break
+            if attempt == MAX_EXPLORATION_RETRIES:
+                print(f"[exploration] WARNING: no batch cleared {FAILED_YIELD_KG:.0f} kg in "
+                      f"{MAX_EXPLORATION_RETRIES} attempts; keeping the last (yield {y:.0f} kg)")
+                break
+            # Rejected -> drop its monitor entry too, so `system.monitor` stays index-aligned with
+            # the kept *_samples_history (diagnostics pair the two by episode index).
+            self.system.monitor.pop()
+            print(f"[exploration] rejected batch (yield {y:.0f} kg < {FAILED_YIELD_KG:.0f} kg), "
+                  f"attempt {attempt}/{MAX_EXPLORATION_RETRIES}; re-rolling")
+
         self.state_samples_history.append(states)
         self.input_samples_history.append(inputs)
         self.noiseless_states_history.append(noiseless)

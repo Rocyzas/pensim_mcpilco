@@ -55,3 +55,16 @@ Comparison is made in the @03_compare ipynb notebook
 
 1. Agent RNG seed (torch/numpy, global RNG) - controls learning algorithm's randomness, which is policy weight initialisation, particle sampling, dropout
 2. Batch seed (PenSimEnv random_seed_ref) - physical fermentation realisation, which is initial conditions, kinetics, disturbances.
+
+
+
+FLAGS TO REMOVE:
+1. Fixed seed on the rollout()
+2. T_SAMPLING 5.0
+3. 
+
+
+THINGS IMPLEMENTED:
+1. Initial explorations ignore the failed batches. Although failed batches due to control are okay for GP inputs, the ones that failed due to physics should be discarded (such as Vis>100 etc). Some failures are detected in real time using multivariate statistical process control (as per paper).
+2. Included ONLY states that are affected by my Fs control: X, P, Wt, (S is not available). And added time.
+3. X, P, Wt are clamped, log-encoded and then normalised.
