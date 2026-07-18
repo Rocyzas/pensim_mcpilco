@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 
-#SBATCH --job-name=mcpilco_07_full
+#SBATCH --job-name=mcpilco_FULL
 #SBATCH -p Teaching
 #SBATCH --gres=gpu:1
 #SBATCH --mem=32G
 
 set -euo pipefail
 
-ARGS=(--seed 0 --num_trials 7)
+# default args, used only when none are passed on the command line
+DEFAULT_ARGS=(--num_trials 12)
 
 MARKER="experiments/02_mcpilco_single_phase.py"
 
@@ -33,5 +34,9 @@ OUTER="$(dirname "$PROJECT")"
 [[ -d "$OUTER/PenSimPy/pensimpy" ]] || { echo "PenSimPy not found at $OUTER/PenSimPy." >&2; exit 1; }
 export PYTHONPATH="$OUTER:$OUTER/PenSimPy${PYTHONPATH:+:$PYTHONPATH}"
 
+ARGS=("$@")
+[[ ${#ARGS[@]} -gt 0 ]] || ARGS=("${DEFAULT_ARGS[@]}")
+
 cd "$PROJECT"
-exec "$PY" -u experiments/02_mcpilco_single_phase.py "${ARGS[@]}" "$@"
+echo "running: $MARKER ${ARGS[*]}"
+exec "$PY" -u "$MARKER" "${ARGS[@]}"
