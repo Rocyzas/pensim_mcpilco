@@ -57,6 +57,7 @@ FPAA_MIN, FPAA_MAX = 0.0, 15.0
 # as there is no data behind them.
 # Also, it would be sensible to compare it with the BO baselines in this way.
 FS_SCALE = 0.5
+# FS_SCALE = 1 #for ceiling test
 
 
 STATE_RANGES = {
@@ -99,11 +100,11 @@ INIT_STATE_PHYS = {"T": 297.98, "DO2": 12.33, "O2": 0.189, "CO2outgas": 1.86,
                    "time": WARMUP_H}
 
 
-WT_SOFT = (7.0e4, 1.1e5)
+WT_SOFT = (7.0e4, 1.1e5) # same as indpensim - valid
 WT_OVERFLOW = 1.2e5
 P_CRASH = 55.0
 PAA_BAND = (800.0, 1600.0)
-VISC_MAX = 100.0
+VISC_MAX = 100.0 # was 150, but indpensim use 100, changing.
 
 # Exploration screening: a batch whose total penicillin yield lands below FAILED_YIELD_KG has
 # collapsed. Such batches are discarded and re-rolled rather than fed to the GPs, so the initial
@@ -401,6 +402,47 @@ class PenSimMCPILCO(MCP.MC_PILCO):
         print(f"[anchors] {num_anchors} launch states from {num_batches} recipe batches "
               f"(+{num_batches} into GP training set); optim_horizon_steps={self.optim_horizon_steps}")
         return self._anchor_states
+
+    def setup_high_feed_probes(self, num_probes=3, levels=(0.6, 0.8, 1.0)):
+        """Roll `num_probes` FIXED, sustained-high-feed batches on a FRESH wrapper and add them
+        straight to the GP training set. Call ONCE before reinforce() (independent of, and
+        combinable with, setup_recipe_anchors).
+
+        Why this exists: the X and Viscosity GPs learn an action-lengthscale of 11.6-39.7 on the
+        [-1, 1] action input in every reward-shaping config tried so far (see evaluations plan,
+        Finding 5) -- i.e. the model has decided feed rate barely affects biomass growth or
+        viscosity at all. That is plausibly because ordinary exploration
+        (`_recipe_exploration_policy`) rarely SUSTAINS a high feed level long enough to reach the
+        viscosity-collapse regime, and any exploration batch that does collapse is rejected and
+        re-rolled by `get_data_from_system`'s FAILED_YIELD_KG screen -- so the GP training set is
+        structurally starved of exactly the data that would teach it the action matters there.
+
+        These probes are deliberately NOT screened by that yield threshold: the point is to give the
+        GP real (state, high-action, viscosity-response) trajectories, collapse included, not to
+        curate a "safe" dataset the way exploration episodes do.
+        """
+        seed_offset = self.system.seed_offset
+        fresh = PenSimWrapper(seed_offset=seed_offset)
+
+        np_state = np.random.get_state()
+        used_levels = []
+        for i in range(num_probes):
+            level = levels[i % len(levels)]
+            used_levels.append(level)
+            probe_policy = lambda state, decision_idx, level=level: np.array([level])
+            # +900 keeps these seeds inside THIS seed_offset's own 1000-wide block (see
+            # config_single_phase.wrapper_par), clear of both setup_recipe_anchors' seed_offset+i
+            # range and the next seed's seed_offset.
+            states, inputs, _ = fresh.rollout(
+                s0=initial_state_norm(), policy=probe_policy,
+                T=CONTROL_H, dt=self.T_sampling, noise=self.std_meas_noise,
+                seed=seed_offset + 900 + i,
+            )
+            self.model_learning.add_data(new_state_samples=states, new_input_samples=inputs)
+        np.random.set_state(np_state)
+
+        print(f"[high-feed probes] added {num_probes} sustained-feed batches at levels "
+              f"{used_levels} to the GP training set")
 
     def reinforce_policy(self, *args, **kwargs):
         if self._anchor_states is not None:

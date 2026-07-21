@@ -28,13 +28,14 @@ from mcpilco.pensim_wrapper import (STATE_DIM,
 
 def get_config(seed=1, num_trials=10, fast=False, dtype=torch.float64, device=torch.device("cpu"),
                optim_horizon_steps=None, num_anchor_batches=0, num_anchors=12, anchor_var=0.01,
-               risk_weight=0.0, visc_penalty=0.5, harvest_reward=True):
+               risk_weight=0.0, visc_penalty=0.5, harvest_reward=True,
+               num_high_feed_probes=0, high_feed_levels=(0.6, 0.8, 1.0)):
     torch.manual_seed(seed)
     np.random.seed(seed)
 
     num_explorations = 5
 
-    n_particles = 20 if fast else 100
+    n_particles = 20 if fast else 400
     n_opt_steps = 150 if fast else 1000
     n_epoch = 100 if fast else 500
 
@@ -129,6 +130,7 @@ def get_config(seed=1, num_trials=10, fast=False, dtype=torch.float64, device=to
     policy_optimization_dict = {
         "num_particles": n_particles,
         "opt_steps_list": [n_opt_steps] * n_list,
+        # original 0.01
         "lr_list": [0.01] * n_list,
         "f_optimizer": "lambda p, lr : torch.optim.Adam(p, lr)",
         "num_step_print": 100,
@@ -139,7 +141,7 @@ def get_config(seed=1, num_trials=10, fast=False, dtype=torch.float64, device=to
         "num_min_diff_cost": 100,
         # CHANGED_THIS from 200
         "min_step": n_opt_steps // 3,
-        "lr_min": 0.001,
+        "lr_min": 0.001, #"lr_min": 0.001,
         "policy_reinit_dict": policy_reinit_dict,
     }
 
@@ -159,5 +161,7 @@ def get_config(seed=1, num_trials=10, fast=False, dtype=torch.float64, device=to
 
     anchor_par = {"num_batches": num_anchor_batches, "num_anchors": num_anchors, "anchor_var": anchor_var}
 
+    probe_par = {"num_probes": num_high_feed_probes, "levels": high_feed_levels}
+
     return {"mc_pilco_init": mc_pilco_init, "reinforce_par": reinforce_par,
-            "wrapper_par": wrapper_par, "anchor_par": anchor_par}
+            "wrapper_par": wrapper_par, "anchor_par": anchor_par, "probe_par": probe_par}

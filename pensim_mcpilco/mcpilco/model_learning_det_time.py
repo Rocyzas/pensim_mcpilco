@@ -13,9 +13,25 @@ import torch
 import model_learning.Model_learning as ML
 import gpr_lib.GP_prior.Stationary_GP as SGP
 
-from mcpilco.pensim_wrapper import STATE_NAMES, TIME_IDX, TIME_DELTA_NORM, TIME_INIT_VAR
+from mcpilco.pensim_wrapper import STATE_NAMES, STATE_DIM, TIME_IDX, TIME_DELTA_NORM, TIME_INIT_VAR
 
 WT_GP_IDX = STATE_NAMES.index("Wt")
+X_GP_IDX = STATE_NAMES.index("X")
+VISC_GP_IDX = STATE_NAMES.index("Viscosity")
+# gp_input = concat(state, action) (Model_learning.data_to_gp_input); action is the only, last
+# input column, so its position in the lengthscales vector is always STATE_DIM.
+ACTION_INPUT_IDX = STATE_DIM
+
+# Channels whose GP is forced to keep resolving the feed-rate action rather than optimise it away.
+# Measured directly off trained checkpoints (log.pkl["parameters_gp_14"], seed12_{0,2,4}, see
+# evaluations plan Finding 5): the X and Viscosity GPs converge to an action-lengthscale of
+# 11.6-39.7 on this [-1, 1] input in every one of 5 reward-shaping configs -- so large the kernel
+# has decided feed rate has ~no effect on biomass growth or viscosity. That means a viscosity
+# penalty in the cost function has no learned gradient path back to the policy, regardless of its
+# weight. RBF_BoundedActionLengthscale caps that one lengthscale so the kernel cannot optimise the
+# action-dependence away.
+BOUNDED_ACTION_GP_IDX = {X_GP_IDX, VISC_GP_IDX}
+MAX_ACTION_LENGTHSCALE = 2.0
 
 # Channels given the empirical recipe-trajectory prior mean (see recipe_trajectory_mean.py).
 # `Wt` is deliberately NOT here -- it has the exact analytic mass balance, which is strictly better.
@@ -98,6 +114,49 @@ class RBF_RecipeMean(SGP.RBF):
         return super(RBF_RecipeMean, self).get_mean(X) + self._recipe_mean.delta_norm(X)
 
 
+class RBF_BoundedActionLengthscale(SGP.RBF):
+    """Plain RBF, except the lengthscale on the action input is capped at MAX_ACTION_LENGTHSCALE.
+
+    Mirrors `Stationary_GP.get_weigted_distances` line for line except for the clamp on one entry
+    of `lengthscales` -- duplicated rather than patched in place because the clamp has to apply to
+    the value used in THIS forward pass, not to the stored parameter: clamping the parameter itself
+    would zero its gradient permanently, while clamping the derived value lets Adam keep pushing on
+    it every step while the effective lengthscale used in the kernel stays bounded (a soft ceiling,
+    not a hard freeze).
+    """
+
+    def get_weigted_distances(self, X1, X2):
+        if self.flg_ARD:
+            lengthscales = torch.exp(self.log_lengthscales_par)
+        else:
+            lengthscales = torch.exp(
+                self.log_lengthscales_par * torch.ones(self.num_features, dtype=self.dtype, device=self.device)
+            )
+        lengthscales = torch.cat([
+            lengthscales[:ACTION_INPUT_IDX],
+            torch.clamp(lengthscales[ACTION_INPUT_IDX:ACTION_INPUT_IDX + 1], max=MAX_ACTION_LENGTHSCALE),
+            lengthscales[ACTION_INPUT_IDX + 1:],
+        ])
+
+        X1_sliced = X1[:, self.active_dims] / lengthscales
+        X1_squared = torch.sum(X1_sliced.mul(X1_sliced), dim=1, keepdim=True)
+        if X2 is None:
+            dist = (
+                X1_squared
+                + X1_squared.transpose(dim0=0, dim1=1)
+                - 2 * torch.matmul(X1_sliced, X1_sliced.transpose(dim0=0, dim1=1))
+            )
+        else:
+            X2_sliced = X2[:, self.active_dims] / lengthscales
+            X2_squared = torch.sum(X2_sliced.mul(X2_sliced), dim=1, keepdim=True)
+            dist = (
+                X1_squared
+                + X2_squared.transpose(dim0=0, dim1=1)
+                - 2 * torch.matmul(X1_sliced, X2_sliced.transpose(dim0=0, dim1=1))
+            )
+        return dist
+
+
 class Model_learning_RBF_det_time(ML.Model_learning_RBF):
     """RBF-GP dynamics with a deterministic `time` channel and prior means on the integrating
     channels: an analytic mass balance for `Wt`, measured recipe trajectories for
@@ -105,11 +164,14 @@ class Model_learning_RBF_det_time(ML.Model_learning_RBF):
 
     def get_gp(self, gp_index, init_dict):
         """Wt gets the mass-balance prior mean, RECIPE_MEAN_CHANNELS get the measured recipe
-        trajectory; every other channel stays a plain RBF."""
+        trajectory, X/Viscosity get a bounded action-lengthscale; every other channel stays a
+        plain RBF."""
         if gp_index == WT_GP_IDX:
             return RBF_WtMassBalance(**init_dict)
         if gp_index in RECIPE_MEAN_GP_IDX:
             return RBF_RecipeMean(channel=STATE_NAMES[gp_index], **init_dict)
+        if gp_index in BOUNDED_ACTION_GP_IDX:
+            return RBF_BoundedActionLengthscale(**init_dict)
         return super(Model_learning_RBF_det_time, self).get_gp(gp_index, init_dict)
 
     # Clamp every imagined next-state to the normalised physical box each rollout step. The real

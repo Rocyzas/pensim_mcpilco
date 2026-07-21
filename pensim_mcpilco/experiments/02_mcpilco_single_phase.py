@@ -41,11 +41,12 @@ def _write_note(log_path, run_params, cfg):
 
 def main(seed=1, num_trials=10, fast=False, out_dir=None,
          optim_horizon=None, num_anchor_batches=0, num_anchors=None, anchor_var=0.01,
-         risk_weight=0.0, visc_penalty=0.5, harvest_reward=True):
+         risk_weight=0.0, visc_penalty=0.5, harvest_reward=True, num_high_feed_probes=0):
     cfg = get_config(seed=seed, num_trials=num_trials, fast=fast,
                      optim_horizon_steps=optim_horizon, num_anchor_batches=num_anchor_batches,
                      num_anchors=num_anchors, anchor_var=anchor_var, risk_weight=risk_weight,
-                     visc_penalty=visc_penalty, harvest_reward=harvest_reward)
+                     visc_penalty=visc_penalty, harvest_reward=harvest_reward,
+                     num_high_feed_probes=num_high_feed_probes)
     log_path = out_dir if out_dir is not None else _next_run_dir(seed)
     cfg["mc_pilco_init"]["log_path"] = log_path
     Path(log_path).mkdir(parents=True, exist_ok=True)
@@ -54,7 +55,7 @@ def main(seed=1, num_trials=10, fast=False, out_dir=None,
                   "optim_horizon": optim_horizon, "num_anchor_batches": num_anchor_batches,
                   "num_anchors": num_anchors, "anchor_var": anchor_var,
                   "risk_weight": risk_weight, "visc_penalty": visc_penalty,
-                  "harvest_reward": harvest_reward}
+                  "harvest_reward": harvest_reward, "num_high_feed_probes": num_high_feed_probes}
     _write_note(log_path, run_params, cfg)
 
     wrapper = PenSimWrapper(**cfg["wrapper_par"])
@@ -62,6 +63,10 @@ def main(seed=1, num_trials=10, fast=False, out_dir=None,
     # multi-origin short rollouts: build the fixed anchor set once, before training (no-op if disabled)
     if num_anchor_batches > 0:
         agent.setup_recipe_anchors(**cfg["anchor_par"])
+    # sustained high-feed probes: give the X/Viscosity GPs real data in the collapse-relevant
+    # region before training starts (no-op if disabled). See setup_high_feed_probes docstring.
+    if num_high_feed_probes > 0:
+        agent.setup_high_feed_probes(**cfg["probe_par"])
     agent.reinforce(**cfg["reinforce_par"])
 
     # constraint plots
@@ -93,6 +98,11 @@ if __name__ == "__main__":
     p.add_argument("--no_harvest_reward", dest="harvest_reward", action="store_false",
                    help="score only in-tank mass, ignoring penicillin drawn off by the discharge "
                         "pulses (~20%% of batch_yield_kg). Default is to credit it.")
+    # targeted high-feed exploration: fixed sustained-feed batches added to the GP training set
+    # before trial 0, so the X/Viscosity GPs see the collapse-relevant region (0 = disabled).
+    p.add_argument("--num_high_feed_probes", type=int, default=0,
+                   help="sustained-high-feed batches added to the GP training set before training "
+                        "starts, cycling through levels (0.6, 0.8, 1.0) (0 = disabled)")
     args = p.parse_args()
     # keyword args: this call has outgrown safe positional matching, and a mis-ordered pair here
     # would silently train on the wrong config rather than fail.
@@ -100,4 +110,4 @@ if __name__ == "__main__":
          optim_horizon=args.optim_horizon, num_anchor_batches=args.num_anchor_batches,
          num_anchors=args.num_anchors, anchor_var=args.anchor_var,
          risk_weight=args.risk_weight, visc_penalty=args.visc_penalty,
-         harvest_reward=args.harvest_reward)
+         harvest_reward=args.harvest_reward, num_high_feed_probes=args.num_high_feed_probes)
