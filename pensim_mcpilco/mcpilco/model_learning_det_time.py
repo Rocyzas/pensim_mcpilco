@@ -18,6 +18,7 @@ from mcpilco.pensim_wrapper import STATE_NAMES, STATE_DIM, TIME_IDX, TIME_DELTA_
 WT_GP_IDX = STATE_NAMES.index("Wt")
 X_GP_IDX = STATE_NAMES.index("X")
 VISC_GP_IDX = STATE_NAMES.index("Viscosity")
+P_GP_IDX = STATE_NAMES.index("P")
 # gp_input = concat(state, action) (Model_learning.data_to_gp_input); action is the only, last
 # input column, so its position in the lengthscales vector is always STATE_DIM.
 ACTION_INPUT_IDX = STATE_DIM
@@ -30,7 +31,7 @@ ACTION_INPUT_IDX = STATE_DIM
 # penalty in the cost function has no learned gradient path back to the policy, regardless of its
 # weight. RBF_BoundedActionLengthscale caps that one lengthscale so the kernel cannot optimise the
 # action-dependence away.
-BOUNDED_ACTION_GP_IDX = {X_GP_IDX, VISC_GP_IDX}
+BOUNDED_ACTION_GP_IDX = {X_GP_IDX, VISC_GP_IDX, P_GP_IDX}
 MAX_ACTION_LENGTHSCALE = 2.0
 
 # Channels given the empirical recipe-trajectory prior mean (see recipe_trajectory_mean.py).
