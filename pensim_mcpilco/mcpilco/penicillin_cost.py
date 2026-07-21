@@ -157,16 +157,16 @@ class PeniConcentrationCost(CF.Expected_cost):
 
         # soft: measured inert. Max Wt is 106,535 at full overfeed (a=+1, seed 700000), below
         # the WT_SOFT[1]=1.1e5 threshold, so this never fired on any reachable trajectory.
-        soft = torch.zeros_like(P)
-        # soft = self.soft_penalty * torch.relu((Wt - WT_SOFT[1]) / 1e4) ** 2
+        # soft = torch.zeros_like(P)
+        soft = self.soft_penalty * torch.relu((Wt - WT_SOFT[1]) / 1e4) ** 2
 
         # visc_soft: RESTORE THIS FIRST if collapsed batches return. The seed11-14 ablation put
         # the collapse rate at 9/44 (20%) with this off vs 5/44 (11%) with visc_penalty=0.5.
         # That difference is not significant at n=4 seeds (Fisher p~0.4), which is why it is
         # being tested -- but it is the only penalty with evidence behind it.
-        visc_soft = torch.zeros_like(P)
-        # visc = self._dn(states_sequence[:, :, VISC_IDX], *STATE_RANGES["Viscosity"])
-        # visc_soft = self.visc_penalty * torch.relu((visc - VISC_MAX) / VISC_SOFT_SCALE) ** 2
+        # visc_soft = torch.zeros_like(P)
+        visc = self._dn(states_sequence[:, :, VISC_IDX], *STATE_RANGES["Viscosity"])
+        visc_soft = self.visc_penalty * torch.relu((visc - VISC_MAX) / VISC_SOFT_SCALE) ** 2
 
         # action_rate: never measured. cost_term_report.py reports it INERT, but that is an
         # artifact of its constant-action probes, not evidence. Dropping it permits chattering Fs.
