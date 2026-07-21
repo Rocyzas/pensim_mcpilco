@@ -26,7 +26,7 @@ from mcpilco.pensim_wrapper import (STATE_DIM,
                                     initial_state_norm)
 
 
-def get_config(seed=1, num_trials=10, fast=False, dtype=torch.float64, device=torch.device("cpu"),
+def get_config(seed=1, num_trials=10, fast=False, dtype=torch.float64, device=torch.device("cuda" if torch.cuda.is_available() else "cpu"),
                optim_horizon_steps=None, num_anchor_batches=0, num_anchors=12, anchor_var=0.01,
                risk_weight=0.0, visc_penalty=0.5, harvest_reward=True,
                num_high_feed_probes=0, high_feed_levels=(0.6, 0.8, 1.0)):
