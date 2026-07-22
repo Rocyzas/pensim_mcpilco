@@ -68,3 +68,41 @@ THINGS IMPLEMENTED:
 1. Initial explorations ignore the failed batches. Although failed batches due to control are okay for GP inputs, the ones that failed due to physics should be discarded (such as Vis>100 etc). Some failures are detected in real time using multivariate statistical process control (as per paper).
 2. Included ONLY states that are affected by my Fs control: X, P, Wt, (S is not available). And added time.
 3. X, P, Wt are clamped, log-encoded and then normalised.
+
+
+
+sbatch run.sh --visc_penalty 0.0 --no_harvest_reward --risk_weight 0.0 --seed 11 --out_dir /home/s2889898/Diss/pensim_mcpilco/pensim_mcpilco/results/cluster/full/seed11_0 --num_trials 11
+
+sbatch run.sh --visc_penalty 0.5 --no_harvest_reward --risk_weight 0.0 --seed 11 --out_dir /home/s2889898/Diss/pensim_mcpilco/pensim_mcpilco/results/cluster/full/seed11_1 --num_trials 11
+
+sbatch run.sh --visc_penalty 0.0 --risk_weight 0.0 --seed 11 --out_dir /home/s2889898/Diss/pensim_mcpilco/pensim_mcpilco/results/cluster/full/seed11_2 --num_trials 11
+
+sbatch run.sh --visc_penalty 0.5 --risk_weight 0.0 --seed 11 --out_dir /home/s2889898/Diss/pensim_mcpilco/pensim_mcpilco/results/cluster/full/seed11_3 --num_trials 11
+
+sbatch run.sh --visc_penalty 0.5 --risk_weight 0.01 --seed 11 --out_dir /home/s2889898/Diss/pensim_mcpilco/pensim_mcpilco/results/cluster/full/seed11_4 --num_trials 11
+
+
+seed3_5 - rbf of V,X,P
+seed2_32 - rbf on none
+seed3_6 - rbf on none, num_min_diff_cost=25
+seed3_7 - rbf on V,X,P, num_min_diff_cost=25 - very good yield, only one -600, --risk_weight 0.01
+seed3_8 - rbf on V,X,P(fix), num_min_diff_cost=25 + --num_high_feed_probes 3 --risk_weight 0.01 - decreased yield
+finding out what decreased yield running, 
+
+seed3_12 - rbf on V,X,P(fix), num_min_diff_cost=25 --risk_weight 0.01
+seed2_33 (same as above but different seed)
+seed2_33 (same as above but different cost function of PeniMassChangeCost)
+
+seed3_13 - rbf on V,X,P(fix), num_min_diff_cost=25 --risk_weight 0.01 --num_high_feed_probes 3 cancelled
+
+
+
+Added DO2
+seed3_9 - rbf on V,X,P(fix), num_min_diff_cost=25 + --num_high_feed_probes 3
+
+
+PLAN
+- Train seed3_12, and observer result (only difference is probes). 
+    If if keeps the yield as good as seed3_7, REMOVE num_high_feed_probes as they are not needed for good yield
+    If yield decreases it means that P(fix) did not help.
+        Then try without P(fix) and with num_high_feed_probes

@@ -30,8 +30,14 @@ ACTION_INPUT_IDX = STATE_DIM
 # has decided feed rate has ~no effect on biomass growth or viscosity. That means a viscosity
 # penalty in the cost function has no learned gradient path back to the policy, regardless of its
 # weight. RBF_BoundedActionLengthscale caps that one lengthscale so the kernel cannot optimise the
-# action-dependence away.
+# action-dependence away. P is included for the same reason -- it is the channel every reward
+# candidate in experiments/cost_reward_hacking_bo.py is built from, so if ITS action-lengthscale
+# blew up the same way, no reward formula would have a usable gradient back to the policy, whatever
+# its weight. P is ALSO in RECIPE_MEAN_GP_IDX below, so get_gp() routes it to
+# RBF_RecipeMean_BoundedActionLengthscale (both behaviours at once), not RBF_BoundedActionLengthscale
+# alone -- see that class's docstring for why a plain either/or choice would silently drop one of them.
 BOUNDED_ACTION_GP_IDX = {X_GP_IDX, VISC_GP_IDX, P_GP_IDX}
+# BOUNDED_ACTION_GP_IDX = {}
 MAX_ACTION_LENGTHSCALE = 2.0
 
 # Channels given the empirical recipe-trajectory prior mean (see recipe_trajectory_mean.py).
@@ -158,17 +164,44 @@ class RBF_BoundedActionLengthscale(SGP.RBF):
         return dist
 
 
+class RBF_RecipeMean_BoundedActionLengthscale(RBF_RecipeMean, RBF_BoundedActionLengthscale):
+    """Both semiparametric behaviours at once: RBF_RecipeMean's prior mean (an off-manifold
+    particle decays towards "grows like the recipe" rather than freezing at delta=0) AND
+    RBF_BoundedActionLengthscale's clamp on the action lengthscale (the kernel cannot optimise
+    away the one channel -- P -- every reward candidate in this project depends on).
+
+    Exists because get_gp() previously had to pick ONE of RBF_RecipeMean / RBF_BoundedActionLengthscale
+    for P, which is a member of BOTH RECIPE_MEAN_GP_IDX and BOUNDED_ACTION_GP_IDX: the sequential
+    if/return dispatch always matched RECIPE_MEAN_GP_IDX first, so RBF_BoundedActionLengthscale's
+    branch was silently unreachable for P and its action-lengthscale was left completely unbounded
+    -- exactly the failure mode measured on X/Viscosity, on the one channel every tested reward
+    formula is built from. The two parents override DIFFERENT methods (get_mean vs
+    get_weigted_distances), so plain multiple inheritance resolves both without conflict: MRO gives
+    get_mean from RBF_RecipeMean and get_weigted_distances from RBF_BoundedActionLengthscale.
+    RBF_BoundedActionLengthscale defines no __init__, so RBF_RecipeMean.__init__'s
+    super().__init__(**init_dict) call chains straight through to SGP.RBF unchanged.
+    """
+    pass
+
+
 class Model_learning_RBF_det_time(ML.Model_learning_RBF):
     """RBF-GP dynamics with a deterministic `time` channel and prior means on the integrating
     channels: an analytic mass balance for `Wt`, measured recipe trajectories for
     RECIPE_MEAN_CHANNELS."""
 
     def get_gp(self, gp_index, init_dict):
-        """Wt gets the mass-balance prior mean, RECIPE_MEAN_CHANNELS get the measured recipe
-        trajectory, X/Viscosity get a bounded action-lengthscale; every other channel stays a
-        plain RBF."""
+        """Wt gets the mass-balance prior mean; a channel in both RECIPE_MEAN_GP_IDX and
+        BOUNDED_ACTION_GP_IDX (currently just P) gets BOTH the recipe-trajectory prior mean and
+        the bounded action-lengthscale, not one or the other -- this check must come before the
+        two single-behaviour checks below it, or it is unreachable (see
+        RBF_RecipeMean_BoundedActionLengthscale's docstring for what silently broke before this
+        check existed). Remaining RECIPE_MEAN_GP_IDX channels get just the recipe trajectory;
+        remaining BOUNDED_ACTION_GP_IDX channels (X, Viscosity) get just the bounded lengthscale;
+        every other channel stays a plain RBF."""
         if gp_index == WT_GP_IDX:
             return RBF_WtMassBalance(**init_dict)
+        if gp_index in RECIPE_MEAN_GP_IDX and gp_index in BOUNDED_ACTION_GP_IDX:
+            return RBF_RecipeMean_BoundedActionLengthscale(channel=STATE_NAMES[gp_index], **init_dict)
         if gp_index in RECIPE_MEAN_GP_IDX:
             return RBF_RecipeMean(channel=STATE_NAMES[gp_index], **init_dict)
         if gp_index in BOUNDED_ACTION_GP_IDX:

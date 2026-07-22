@@ -13,7 +13,7 @@ import gpr_lib.Likelihood.Gaussian_likelihood as Likelihood
 import model_learning.Model_learning as ML
 import policy_learning.Policy as Policy
 
-from mcpilco.penicillin_cost import PeniConcentrationCost
+from mcpilco.penicillin_cost import PeniConcentrationCost, PeniMassChangeCost
 
 # CHANGED_THIS
 from mcpilco.model_learning_det_time import Model_learning_RBF_det_time
@@ -102,7 +102,8 @@ def get_config(seed=1, num_trials=10, fast=False, dtype=torch.float64, device=to
         "rand_exploration_policy_par": rand_exploration_policy_par,
         "f_control_policy": Policy.Sum_of_gaussians,
         "control_policy_par": control_policy_par,
-        "f_cost_function": PeniConcentrationCost,
+        # "f_cost_function": PeniConcentrationCost,
+        'f_cost_function': PeniMassChangeCost,
 
         # risk_weight scales the across-particle std IN THE OPTIMISED OBJECTIVE (0.0 = stock
         # risk-neutral mean). The std runs ~25x the mean cost here, so useful values are small:
@@ -138,7 +139,7 @@ def get_config(seed=1, num_trials=10, fast=False, dtype=torch.float64, device=to
         "p_drop_reduction": 0.1,
         "alpha_diff_cost": 0.99,
         "min_diff_cost": 0.05,
-        "num_min_diff_cost": 100,
+        "num_min_diff_cost": 25,
         # CHANGED_THIS from 200
         "min_step": n_opt_steps // 3,
         "lr_min": 0.001, #"lr_min": 0.001,
