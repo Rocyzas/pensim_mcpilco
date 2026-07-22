@@ -139,7 +139,7 @@ def get_config(seed=1, num_trials=10, fast=False, dtype=torch.float64, device=to
         "p_drop_reduction": 0.1,
         "alpha_diff_cost": 0.99,
         "min_diff_cost": 0.05,
-        "num_min_diff_cost": 25,
+        "num_min_diff_cost": 100,
         # CHANGED_THIS from 200
         "min_step": n_opt_steps // 3,
         "lr_min": 0.001, #"lr_min": 0.001,
