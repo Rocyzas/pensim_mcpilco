@@ -23,7 +23,8 @@ from mcpilco.pensim_wrapper import (STATE_DIM,
                                     CONTROL_H,
                                     TIME_IDX,
                                     TIME_INIT_VAR,
-                                    initial_state_norm)
+                                    initial_state_norm,
+                                    initial_state_var_norm)
 
 
 def get_config(seed=1, num_trials=10, fast=False, dtype=torch.float64, device=torch.device("cuda" if torch.cuda.is_available() else "cpu"),
@@ -64,6 +65,13 @@ def get_config(seed=1, num_trials=10, fast=False, dtype=torch.float64, device=to
         "approximation_dict": {"SOD_threshold_mode": "relative",
                                "SOD_threshold": 0.3,
                                "flg_SOD_permutation": False},
+        # Rescales each GP's training targets by their own max(|delta|) before fitting (see
+        # Model_learning.train_gp_likelihood), so sigma_n_init/lambda_init below are read against a
+        # uniform ~O(1) target scale on every channel instead of each channel's raw delta magnitude
+        # (which differ by orders of magnitude across {Wt, X, P, Viscosity, time}). Prediction mean
+        # is unaffected (linear in Y, so raw-scale alpha falls out for free); predicted variance is
+        # rescaled back explicitly in Model_learning.get_next_state.
+        "flg_norm": False,
         "dtype": dtype, "device": device,
     }
 
@@ -88,7 +96,9 @@ def get_config(seed=1, num_trials=10, fast=False, dtype=torch.float64, device=to
 # CHANGED_THIS added
     std_meas_noise = 0.01 * np.ones(STATE_DIM)
     std_meas_noise[TIME_IDX] = 0.0
-    initial_state_var = 0.01 * np.ones(STATE_DIM)
+    # Per-channel empirical spread at K_WARM, not a uniform guess -- see initial_state_var_norm's
+    # docstring for why a uniform 0.01 was disproportionate for some channels.
+    initial_state_var = initial_state_var_norm().copy()
     initial_state_var[TIME_IDX] = TIME_INIT_VAR
 
     mc_pilco_init = {
@@ -102,8 +112,8 @@ def get_config(seed=1, num_trials=10, fast=False, dtype=torch.float64, device=to
         "rand_exploration_policy_par": rand_exploration_policy_par,
         "f_control_policy": Policy.Sum_of_gaussians,
         "control_policy_par": control_policy_par,
-        # "f_cost_function": PeniConcentrationCost,
-        'f_cost_function': PeniMassChangeCost,
+        "f_cost_function": PeniConcentrationCost,
+        # 'f_cost_function': PeniMassChangeCost,
 
         # risk_weight scales the across-particle std IN THE OPTIMISED OBJECTIVE (0.0 = stock
         # risk-neutral mean). The std runs ~25x the mean cost here, so useful values are small:
@@ -139,7 +149,7 @@ def get_config(seed=1, num_trials=10, fast=False, dtype=torch.float64, device=to
         "p_drop_reduction": 0.1,
         "alpha_diff_cost": 0.99,
         "min_diff_cost": 0.05,
-        "num_min_diff_cost": 100,
+        "num_min_diff_cost": 25,
         # CHANGED_THIS from 200
         "min_step": n_opt_steps // 3,
         "lr_min": 0.001, #"lr_min": 0.001,

@@ -90,10 +90,25 @@ seed3_8 - rbf on V,X,P(fix), num_min_diff_cost=25 + --num_high_feed_probes 3 --r
 finding out what decreased yield running, 
 
 seed3_12 - rbf on V,X,P(fix), num_min_diff_cost=25 --risk_weight 0.01
+    32 skipped
 seed2_33 (same as above but different seed)
-seed2_33 (same as above but different cost function of PeniMassChangeCost)
+seed2_33 PeniConcentrationCost
+seed2_34 PeniMassChangeCost
 
-seed3_13 - rbf on V,X,P(fix), num_min_diff_cost=25 --risk_weight 0.01 --num_high_feed_probes 3 cancelled
+seed2_35 same as 34, but removed --risk_weight.
+seed2_36 same as 34, but increased --risk_weight to 0.05
+
+seed2_37 - run after the feedback changes.
+
+seed3_13 - new fix, identical with seed3_7 for comparison if fix did the job
+    rollouts greit krenta, yield is good.
+seed3_14 - identical with seed3_13 for comparison if 1. fix of 'Ranges + flg_norm + remove lengthscale cap' worked
+    code changes + flg_norm
+seed3_15 - identical with seed3_14 just with the flag_norm=False
+    THIS IMPROVED THE norms, GP predictions, and yield!!!
+    one problem left is that P is not sensitive enough.
+seed3_16 - checking if adding '--num_high_feed_probes 3' would fix the P sensitivity.
+    Watch two numbers: P's spread/σ_n ratio, and the model/true ratio at j=8, a=+1.0. If that ratio moves from 0.03 toward 0.3+, data was the binding constraint.
 
 
 

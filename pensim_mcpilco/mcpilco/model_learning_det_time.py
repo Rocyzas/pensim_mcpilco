@@ -16,29 +16,9 @@ import gpr_lib.GP_prior.Stationary_GP as SGP
 from mcpilco.pensim_wrapper import STATE_NAMES, STATE_DIM, TIME_IDX, TIME_DELTA_NORM, TIME_INIT_VAR
 
 WT_GP_IDX = STATE_NAMES.index("Wt")
-X_GP_IDX = STATE_NAMES.index("X")
-VISC_GP_IDX = STATE_NAMES.index("Viscosity")
-P_GP_IDX = STATE_NAMES.index("P")
 # gp_input = concat(state, action) (Model_learning.data_to_gp_input); action is the only, last
 # input column, so its position in the lengthscales vector is always STATE_DIM.
 ACTION_INPUT_IDX = STATE_DIM
-
-# Channels whose GP is forced to keep resolving the feed-rate action rather than optimise it away.
-# Measured directly off trained checkpoints (log.pkl["parameters_gp_14"], seed12_{0,2,4}, see
-# evaluations plan Finding 5): the X and Viscosity GPs converge to an action-lengthscale of
-# 11.6-39.7 on this [-1, 1] input in every one of 5 reward-shaping configs -- so large the kernel
-# has decided feed rate has ~no effect on biomass growth or viscosity. That means a viscosity
-# penalty in the cost function has no learned gradient path back to the policy, regardless of its
-# weight. RBF_BoundedActionLengthscale caps that one lengthscale so the kernel cannot optimise the
-# action-dependence away. P is included for the same reason -- it is the channel every reward
-# candidate in experiments/cost_reward_hacking_bo.py is built from, so if ITS action-lengthscale
-# blew up the same way, no reward formula would have a usable gradient back to the policy, whatever
-# its weight. P is ALSO in RECIPE_MEAN_GP_IDX below, so get_gp() routes it to
-# RBF_RecipeMean_BoundedActionLengthscale (both behaviours at once), not RBF_BoundedActionLengthscale
-# alone -- see that class's docstring for why a plain either/or choice would silently drop one of them.
-BOUNDED_ACTION_GP_IDX = {X_GP_IDX, VISC_GP_IDX, P_GP_IDX}
-# BOUNDED_ACTION_GP_IDX = {}
-MAX_ACTION_LENGTHSCALE = 2.0
 
 # Channels given the empirical recipe-trajectory prior mean (see recipe_trajectory_mean.py).
 # `Wt` is deliberately NOT here -- it has the exact analytic mass balance, which is strictly better.
@@ -121,91 +101,27 @@ class RBF_RecipeMean(SGP.RBF):
         return super(RBF_RecipeMean, self).get_mean(X) + self._recipe_mean.delta_norm(X)
 
 
-class RBF_BoundedActionLengthscale(SGP.RBF):
-    """Plain RBF, except the lengthscale on the action input is capped at MAX_ACTION_LENGTHSCALE.
-
-    Mirrors `Stationary_GP.get_weigted_distances` line for line except for the clamp on one entry
-    of `lengthscales` -- duplicated rather than patched in place because the clamp has to apply to
-    the value used in THIS forward pass, not to the stored parameter: clamping the parameter itself
-    would zero its gradient permanently, while clamping the derived value lets Adam keep pushing on
-    it every step while the effective lengthscale used in the kernel stays bounded (a soft ceiling,
-    not a hard freeze).
-    """
-
-    def get_weigted_distances(self, X1, X2):
-        if self.flg_ARD:
-            lengthscales = torch.exp(self.log_lengthscales_par)
-        else:
-            lengthscales = torch.exp(
-                self.log_lengthscales_par * torch.ones(self.num_features, dtype=self.dtype, device=self.device)
-            )
-        lengthscales = torch.cat([
-            lengthscales[:ACTION_INPUT_IDX],
-            torch.clamp(lengthscales[ACTION_INPUT_IDX:ACTION_INPUT_IDX + 1], max=MAX_ACTION_LENGTHSCALE),
-            lengthscales[ACTION_INPUT_IDX + 1:],
-        ])
-
-        X1_sliced = X1[:, self.active_dims] / lengthscales
-        X1_squared = torch.sum(X1_sliced.mul(X1_sliced), dim=1, keepdim=True)
-        if X2 is None:
-            dist = (
-                X1_squared
-                + X1_squared.transpose(dim0=0, dim1=1)
-                - 2 * torch.matmul(X1_sliced, X1_sliced.transpose(dim0=0, dim1=1))
-            )
-        else:
-            X2_sliced = X2[:, self.active_dims] / lengthscales
-            X2_squared = torch.sum(X2_sliced.mul(X2_sliced), dim=1, keepdim=True)
-            dist = (
-                X1_squared
-                + X2_squared.transpose(dim0=0, dim1=1)
-                - 2 * torch.matmul(X1_sliced, X2_sliced.transpose(dim0=0, dim1=1))
-            )
-        return dist
-
-
-class RBF_RecipeMean_BoundedActionLengthscale(RBF_RecipeMean, RBF_BoundedActionLengthscale):
-    """Both semiparametric behaviours at once: RBF_RecipeMean's prior mean (an off-manifold
-    particle decays towards "grows like the recipe" rather than freezing at delta=0) AND
-    RBF_BoundedActionLengthscale's clamp on the action lengthscale (the kernel cannot optimise
-    away the one channel -- P -- every reward candidate in this project depends on).
-
-    Exists because get_gp() previously had to pick ONE of RBF_RecipeMean / RBF_BoundedActionLengthscale
-    for P, which is a member of BOTH RECIPE_MEAN_GP_IDX and BOUNDED_ACTION_GP_IDX: the sequential
-    if/return dispatch always matched RECIPE_MEAN_GP_IDX first, so RBF_BoundedActionLengthscale's
-    branch was silently unreachable for P and its action-lengthscale was left completely unbounded
-    -- exactly the failure mode measured on X/Viscosity, on the one channel every tested reward
-    formula is built from. The two parents override DIFFERENT methods (get_mean vs
-    get_weigted_distances), so plain multiple inheritance resolves both without conflict: MRO gives
-    get_mean from RBF_RecipeMean and get_weigted_distances from RBF_BoundedActionLengthscale.
-    RBF_BoundedActionLengthscale defines no __init__, so RBF_RecipeMean.__init__'s
-    super().__init__(**init_dict) call chains straight through to SGP.RBF unchanged.
-    """
-    pass
-
-
 class Model_learning_RBF_det_time(ML.Model_learning_RBF):
     """RBF-GP dynamics with a deterministic `time` channel and prior means on the integrating
     channels: an analytic mass balance for `Wt`, measured recipe trajectories for
-    RECIPE_MEAN_CHANNELS."""
+    RECIPE_MEAN_CHANNELS.
+
+    No action-lengthscale cap: an earlier version clamped the action input's lengthscale on X/P/
+    Viscosity (RBF_BoundedActionLengthscale) after measuring it converge to 11.6-39.7 on multiple
+    checkpoints -- i.e. the kernel deciding feed rate has ~no effect. That cap forced the kernel to
+    keep "seeing" the action without addressing why it wanted to ignore it in the first place (too
+    little data at sustained high/low feed for the GP to resolve an effect against noise), so it
+    just hid the symptom while still letting an under-informed action gradient reach the policy.
+    Getting real action sensitivity is a data problem (see setup_high_feed_probes and
+    experiments/action_sensitivity.py's action-deafness diagnostic), not a kernel-constraint one --
+    that diagnostic is what should be used to check whether a GP can feel the action now.
+    """
 
     def get_gp(self, gp_index, init_dict):
-        """Wt gets the mass-balance prior mean; a channel in both RECIPE_MEAN_GP_IDX and
-        BOUNDED_ACTION_GP_IDX (currently just P) gets BOTH the recipe-trajectory prior mean and
-        the bounded action-lengthscale, not one or the other -- this check must come before the
-        two single-behaviour checks below it, or it is unreachable (see
-        RBF_RecipeMean_BoundedActionLengthscale's docstring for what silently broke before this
-        check existed). Remaining RECIPE_MEAN_GP_IDX channels get just the recipe trajectory;
-        remaining BOUNDED_ACTION_GP_IDX channels (X, Viscosity) get just the bounded lengthscale;
-        every other channel stays a plain RBF."""
         if gp_index == WT_GP_IDX:
             return RBF_WtMassBalance(**init_dict)
-        if gp_index in RECIPE_MEAN_GP_IDX and gp_index in BOUNDED_ACTION_GP_IDX:
-            return RBF_RecipeMean_BoundedActionLengthscale(channel=STATE_NAMES[gp_index], **init_dict)
         if gp_index in RECIPE_MEAN_GP_IDX:
             return RBF_RecipeMean(channel=STATE_NAMES[gp_index], **init_dict)
-        if gp_index in BOUNDED_ACTION_GP_IDX:
-            return RBF_BoundedActionLengthscale(**init_dict)
         return super(Model_learning_RBF_det_time, self).get_gp(gp_index, init_dict)
 
     # Clamp every imagined next-state to the normalised physical box each rollout step. The real

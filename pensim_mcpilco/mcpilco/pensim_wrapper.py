@@ -73,14 +73,20 @@ STATE_RANGES = {
     # operating range at z=-1). The spike is the substrate-accumulation warning that precedes a crash.
     # "S":         (np.log(STATE_LOG_FLOOR), np.log(20.0)),
     # "S":         (0, 5),
-    "X":         (np.log(STATE_LOG_FLOOR), np.log(40.0)),
-    "P":         (np.log(STATE_LOG_FLOOR), np.log(40.0)),
+    # Lower bound is the reachable operating floor, NOT STATE_LOG_FLOOR (the encode-clamp used to
+    # avoid log(0) when a value is genuinely zero, e.g. P at batch start). Using STATE_LOG_FLOOR=1e-6
+    # here made the normalisation range span 17.5 log units while the real production band (X~15-35
+    # g/L) only spans ~0.07 of [-1,1] -- crushing the policy-relevant region into a sliver the RBF/GP
+    # lengthscales can't resolve. These floors are set to the smallest physically reachable values
+    # instead.
+    "X":         (np.log(0.05), np.log(40.0)),
+    "P":         (np.log(0.01), np.log(45.0)),
     # Measured over 619 logged batches: min 4.1, median 49.5, p99 142.6, max 188.8 cP. Linear, NOT
     # log-encoded -- the span is only ~46x (so a single RBF lengthscale copes), the decision-relevant
     # region is the 100-190 top end where linear gives the better resolution, and staying off the
     # exp() decode path keeps this channel out of the rollout blow-up mode that {Wt,X,P} needed
     # clamping for. Upper bound 200 leaves headroom above the worst observed batch.
-    "Viscosity": (0.0,   200.0),
+    "Viscosity": (0.0,   120.0),
     "time":      (0.0,   230.0),
 }
 
@@ -110,7 +116,14 @@ VISC_MAX = 100.0 # was 150, but indpensim use 100, changing.
 # collapsed. Such batches are discarded and re-rolled rather than fed to the GPs, so the initial
 # model is not built on failed batches (see PenSimMCPILCO.get_data_from_system).
 FAILED_YIELD_KG = 2000.0
-MAX_EXPLORATION_RETRIES = 20 
+MAX_EXPLORATION_RETRIES = 20
+
+# Reserved seed block for population-level measurement rollouts (x0, recipe-trajectory prior means).
+# These measure statistics that should be independent of the run seed, so they must stay clear of
+# every run's training/eval range (seed_offset = seed*1000 + episode, i.e. seed*1000..seed*1000+~900)
+# and of setup_high_feed_probes' seed_offset+900 block. 900_000 requires seed >= 900 before any
+# collision is even possible.
+MEASUREMENT_SEED_BASE = 900_000
 
 
 def _normalise(value, lo, hi):
@@ -165,14 +178,25 @@ def extract_state(batch_x, k):
 
 _init_state_cache = {}
 
+# Floor on the empirical initial_state_var so no channel (e.g. one with near-zero measured
+# batch-to-batch spread at K_WARM) collapses to a literal 0, which the Gaussian particle sampler
+# cannot handle.
+INIT_STATE_VAR_FLOOR = 1e-4
 
-def _measure_init_state_norm(num_batches=6):
-    """Normalised handover state (x0), MEASURED by rolling pure-recipe batches up to K_WARM.
+
+def _measure_init_state_stats(num_batches=6):
+    """Normalised handover state mean AND variance (x0), MEASURED by rolling pure-recipe batches
+    up to K_WARM.
 
     Derived from the live WARMUP_H / STATE_RANGES so it can never go stale. (INIT_STATE_PHYS below is
     a hard-coded snapshot taken for WARMUP_H=120; it silently became wrong the moment WARMUP_H changed,
     which made policy optimisation launch its imagined rollouts from a fully-grown reactor while the
     real batch started at inoculation.)
+
+    Uses MEASUREMENT_SEED_BASE rather than seed 0: this measures a population-level statistic that
+    should be independent of the run seed, but with the old hardcoded seed_offset=0 a run started
+    with --seed 0 (wrapper_par seed_offset=0) would measure x0 from the EXACT SAME simulator
+    realisations (seeds 0..num_batches-1) as its own training/exploration episodes.
 
     NOT CACHED ON DISK, on purpose. A previous version wrote results/_init_state_cache/x0_kwarm{K}.npy
     keyed only by K_WARM -- so editing STATE_RANGES (x0 is stored NORMALISED) silently reused a stale
@@ -184,19 +208,35 @@ def _measure_init_state_norm(num_batches=6):
         return _init_state_cache[K_WARM]
 
     recipe_policy = lambda state, decision_idx: np.array([0.0])
-    fresh = PenSimWrapper(seed_offset=0)
+    fresh = PenSimWrapper(seed_offset=MEASUREMENT_SEED_BASE)
     np_state = np.random.get_state()
-    x0 = np.mean([fresh.rollout(s0=None, policy=recipe_policy, T=CONTROL_H, dt=T_SAMPLING,
-                                noise=None, seed=i)[0][0] for i in range(num_batches)], axis=0)
+    x0_samples = np.stack([fresh.rollout(s0=None, policy=recipe_policy, T=CONTROL_H, dt=T_SAMPLING,
+                                         noise=None, seed=MEASUREMENT_SEED_BASE + i)[0][0]
+                           for i in range(num_batches)])
     np.random.set_state(np_state)
 
-    _init_state_cache[K_WARM] = x0
-    return x0
+    x0_mean = np.mean(x0_samples, axis=0)
+    x0_var = np.maximum(np.var(x0_samples, axis=0), INIT_STATE_VAR_FLOOR)
+
+    _init_state_cache[K_WARM] = (x0_mean, x0_var)
+    return x0_mean, x0_var
 
 
 def initial_state_norm():
     """Normalised state at the WARMUP_H turn-on point (RL phase x0), measured from the recipe."""
-    return _measure_init_state_norm()
+    return _measure_init_state_stats()[0]
+
+
+def initial_state_var_norm():
+    """Per-channel empirical variance of the normalised x0, measured from the recipe.
+
+    Replaces a uniform hardcoded value (previously 0.01 for every channel) with the actual measured
+    batch-to-batch spread at K_WARM -- channels with a compressed normalised range (see STATE_RANGES)
+    or genuinely low real-world spread no longer get an artificially large particle-initialisation
+    variance relative to what they can resolve. Caller overrides TIME_IDX separately (see
+    config_single_phase.py) since time is deterministic.
+    """
+    return _measure_init_state_stats()[1]
 
 
 class PenSimWrapper:
@@ -290,7 +330,21 @@ class PenSimWrapper:
 
         self.monitor.append({a: np.array(mon[a]) for a in mon})
         self._episode += 1
-        return states, inputs, states.copy()
+
+        # `noise` (std_meas_noise from config) previously had no effect: this always returned
+        # `states.copy()` as the "noiseless" slot, meaning the GP was ALWAYS trained on the noiseless
+        # trajectory and `noiseless_states_history` was a pure duplicate. Callers that feed the GP
+        # (get_data_from_system, setup_recipe_anchors, setup_high_feed_probes) use the FIRST return
+        # slot as training data, so measurement noise has to be injected there, with the true
+        # simulator output kept in the second slot. Re-clip to [-1, 1] afterward: the GP is only ever
+        # trained on [-1, 1] data (see Model_learning_RBF_det_time.state_clamp), so that invariant
+        # must hold post-noise too.
+        if noise is not None:
+            noisy_states = states + np.random.normal(scale=noise, size=states.shape)
+            noisy_states = np.clip(noisy_states, -1.0, 1.0)
+        else:
+            noisy_states = states
+        return noisy_states, inputs, states.copy()
 
 
 class PenSimMCPILCO(MCP.MC_PILCO):

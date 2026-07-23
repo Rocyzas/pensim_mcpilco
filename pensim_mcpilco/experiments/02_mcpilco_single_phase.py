@@ -91,7 +91,7 @@ if __name__ == "__main__":
     # risk-averse objective: mean + risk_weight * across-particle std (0 = stock risk-neutral mean).
     # The std runs ~25x the mean cost here, so useful values are small: ~0.005-0.02.
     p.add_argument("--risk_weight", type=float, default=0.0,
-                   help="weight on imagined-outcome spread in the objective (0 = disabled)")
+                   help="PARTICLE SPREAD PENTALTY. weight on imagined-outcome spread in the objective (0 = disabled)")
     # cost-shaping terms (see penicillin_cost.PeniConcentrationCost)
     p.add_argument("--visc_penalty", type=float, default=0.5,
                    help="quadratic penalty weight on broth viscosity above VISC_MAX (0 = disabled)")

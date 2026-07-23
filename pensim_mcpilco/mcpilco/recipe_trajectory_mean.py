@@ -46,8 +46,12 @@ import numpy as np
 import torch
 
 from mcpilco.pensim_wrapper import (STATE_NAMES, STATE_RANGES, T_SAMPLING, K_WARM,
-                                    CONTROL_H, STATE_LOG_CHANNELS)
+                                    CONTROL_H, STATE_LOG_CHANNELS, MEASUREMENT_SEED_BASE)
 from utils.constants import STEP_IN_HOURS
+
+# Distinct sub-block of MEASUREMENT_SEED_BASE so this measurer's realisations don't coincide with
+# _measure_init_state_stats' (pensim_wrapper.py), which uses MEASUREMENT_SEED_BASE directly.
+RECIPE_MEAN_SEED_BASE = MEASUREMENT_SEED_BASE + 1000
 
 TIME_IDX = STATE_NAMES.index("time")
 _T_LO, _T_HI = STATE_RANGES["time"]
@@ -59,7 +63,7 @@ DEFAULT_NUM_BATCHES = 4
 _traj_cache = {}
 
 
-def _measure_recipe_deltas(num_batches=DEFAULT_NUM_BATCHES, seed_offset=0):
+def _measure_recipe_deltas(num_batches=DEFAULT_NUM_BATCHES, seed_offset=RECIPE_MEAN_SEED_BASE):
     """Mean per-decision delta of every state channel under the pure recipe.
 
     Returns an array [n_decisions, STATE_DIM] of deltas in NORMALISED (encoded) units -- the same
@@ -67,6 +71,12 @@ def _measure_recipe_deltas(num_batches=DEFAULT_NUM_BATCHES, seed_offset=0):
 
     Rolled on a FRESH wrapper with the global NumPy state saved/restored, so a training run's own
     episode/seed sequence is untouched and building the prior mean cannot perturb the experiment.
+
+    Defaults to RECIPE_MEAN_SEED_BASE, not 0: this measures a population-level statistic that should
+    be independent of the run seed. With the old hardcoded default of 0, a run started with --seed 0
+    (wrapper_par seed_offset=0) would measure this prior mean from the EXACT SAME simulator
+    realisations as its own training/exploration episodes -- and every caller of this function left
+    seed_offset at its default, so it always silently used seed 0 regardless of --seed.
     """
     key = (num_batches, seed_offset)
     if key in _traj_cache:
@@ -93,7 +103,7 @@ def _measure_recipe_deltas(num_batches=DEFAULT_NUM_BATCHES, seed_offset=0):
 class RecipeTrajectoryMean:
     """Torch-side lookup of the recipe prior mean for ONE channel (batched, autograd-safe)."""
 
-    def __init__(self, channel, num_batches=DEFAULT_NUM_BATCHES, seed_offset=0,
+    def __init__(self, channel, num_batches=DEFAULT_NUM_BATCHES, seed_offset=RECIPE_MEAN_SEED_BASE,
                  dtype=torch.float64, device=torch.device("cpu")):
         if channel not in STATE_NAMES:
             raise ValueError(f"{channel!r} is not a state channel: {STATE_NAMES}")
