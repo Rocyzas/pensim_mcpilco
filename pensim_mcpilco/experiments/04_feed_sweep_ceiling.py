@@ -58,8 +58,9 @@ from experiments.eval_utils import yield_kg, constraint_diagnostics
 
 # ------------------------------------------------------------------ config ----
 EVAL_BASE     = 700_000          # held-out seed block (disjoint from training seeds)
-N_EVAL_SEEDS  = 10
+N_EVAL_SEEDS  = 5
 CONST_LEVELS  = [-1.0, -0.6, -0.3, -0.1, 0.0, 0.1, 0.3, 0.6, 1.0]  # a-residual sweep (incl. asks)
+# CONST_LEVELS  = [1.0]  # a-residual sweep (incl. asks)
 OUT_DIR       = Path(_ROOT) / "results" / "feed_sweep_ceiling"
 
 # shaped, time-scheduled deviations: list of (t_start_h, t_end_h, level); gaps default to a=0

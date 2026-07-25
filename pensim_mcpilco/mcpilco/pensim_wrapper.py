@@ -34,6 +34,10 @@ patch_fastodeint()
 # thickens the broth, oxygen transfer fails, and penicillin DEGRADES instead of accumulating.
 # Without this channel the GP cannot represent that mechanism, the policy cannot react to it, and no
 # risk term can price it: the failure is literally invisible to every part of the agent.
+# Every other module indexes channels either by name (STATE_NAMES.index(...)) or via
+# `len(STATE_NAMES)` for the action column (see wt_mass_balance.py's ACTION_COL and
+# penicillin_cost.py's P_IDX/WT_IDX/VISC_IDX/TIME_IDX), so both are derived from this list rather
+# than hardcoded.
 STATE_NAMES = ["Wt", "X", "P", "Viscosity", "time"]
 STATE_DIM = len(STATE_NAMES)
 ACTION_DIM = 1
@@ -43,7 +47,7 @@ STATE_LOG_CHANNELS = {"Wt", "X", "P"}
 STATE_LOG_FLOOR = 1e-6
 
 WARMUP_H = 0
-T_SAMPLING = 5.0
+T_SAMPLING = 5
 STEPS_PER_DECISION = int(round(T_SAMPLING / STEP_IN_HOURS))
 
 K_WARM = max(1, int(round(WARMUP_H / STEP_IN_HOURS)))
@@ -115,7 +119,7 @@ VISC_MAX = 100.0 # was 150, but indpensim use 100, changing.
 # Exploration screening: a batch whose total penicillin yield lands below FAILED_YIELD_KG has
 # collapsed. Such batches are discarded and re-rolled rather than fed to the GPs, so the initial
 # model is not built on failed batches (see PenSimMCPILCO.get_data_from_system).
-FAILED_YIELD_KG = 2000.0
+# FAILED_YIELD_KG = 2000.0
 MAX_EXPLORATION_RETRIES = 20
 
 # Reserved seed block for population-level measurement rollouts (x0, recipe-trajectory prior means).
@@ -237,6 +241,40 @@ def initial_state_var_norm():
     config_single_phase.py) since time is deterministic.
     """
     return _measure_init_state_stats()[1]
+
+
+PROBE_BLOCK_HOURS = 40.0
+
+
+def _ramp_profile(level, n):
+    """0 -> level -> 0 triangle over the batch: the action changes almost every decision."""
+    half = n // 2
+    up = np.linspace(0.0, level, half, endpoint=False)
+    down = np.linspace(level, 0.0, n - half)
+    return np.concatenate([up, down])
+
+
+def _step_high_low_profile(level, n):
+    """One switch: sustained +level for the first half, sustained -level for the second."""
+    half = n // 2
+    return np.concatenate([np.full(half, level), np.full(n - half, -level)])
+
+
+def _alternating_blocks_profile(level, n, block_hours=PROBE_BLOCK_HOURS):
+    """+level/-level square wave in `block_hours`-wide blocks: repeated switches spread through
+    the whole batch, rather than _step_high_low_profile's single one."""
+    block_decisions = max(1, int(round(block_hours / T_SAMPLING)))
+    block = (np.arange(n) // block_decisions) % 2
+    return np.where(block == 0, level, -level)
+
+
+# Cycled round-robin across probes (see setup_high_feed_probes): each shape sustains high/low feed
+# differently, giving the GP training set a range of sustained-feed patterns rather than just one.
+PROBE_SHAPES = {
+    "ramp": _ramp_profile,
+    "step_high_low": _step_high_low_profile,
+    "alternating_blocks": _alternating_blocks_profile,
+}
 
 
 class PenSimWrapper:
@@ -379,39 +417,39 @@ class PenSimMCPILCO(MCP.MC_PILCO):
         # again until a batch clears the bar, so the `num_explorations` batches that seed the model are
         # all non-failed. Only exploration is screened -- POLICY batches are always kept however they
         # turn out, or the learning loop would be blind to its own failures.
-        for attempt in range(1, MAX_EXPLORATION_RETRIES + 1):
-            if flg_exploration:
-                np_policy = self._recipe_exploration_policy()
-            else:
-                np_policy = self.control_policy.get_np_policy()
+        # for attempt in range(1, MAX_EXPLORATION_RETRIES + 1):
+        if flg_exploration:
+            np_policy = self._recipe_exploration_policy()
+        else:
+            np_policy = self.control_policy.get_np_policy()
 
-            # No `seed` here on purpose: rollout then draws its realisation from
-            # `_episode + seed_offset`, so every episode gets fresh initial conditions and batch
-            # parameters (alpha_kla, PAA_c, N_conc_paa). A fixed realisation made successive
-            # on-policy batches near-duplicates once the policy converged -- the GP gained no new
-            # information from them while its noise term kept shrinking. seed_offset = seed * 1000
-            # (config_single_phase) keeps different config seeds from colliding.
-            states, inputs, noiseless = self.system.rollout(
-                initial_state, np_policy, T_exploration, self.T_sampling,
-                self.std_meas_noise
-            )
+        # No `seed` here on purpose: rollout then draws its realisation from
+        # `_episode + seed_offset`, so every episode gets fresh initial conditions and batch
+        # parameters (alpha_kla, PAA_c, N_conc_paa). A fixed realisation made successive
+        # on-policy batches near-duplicates once the policy converged -- the GP gained no new
+        # information from them while its noise term kept shrinking. seed_offset = seed * 1000
+        # (config_single_phase) keeps different config seeds from colliding.
+        states, inputs, noiseless = self.system.rollout(
+            initial_state, np_policy, T_exploration, self.T_sampling,
+            self.std_meas_noise
+        )
 
-            if not flg_exploration:
-                break
-            y = batch_yield_kg(self.system.monitor[-1])
-            if y >= FAILED_YIELD_KG:
-                if attempt > 1:
-                    print(f"[exploration] accepted on attempt {attempt} (yield {y:.0f} kg)")
-                break
-            if attempt == MAX_EXPLORATION_RETRIES:
-                print(f"[exploration] WARNING: no batch cleared {FAILED_YIELD_KG:.0f} kg in "
-                      f"{MAX_EXPLORATION_RETRIES} attempts; keeping the last (yield {y:.0f} kg)")
-                break
+        # if not flg_exploration:
+        #     break
+            # y = batch_yield_kg(self.system.monitor[-1])
+            # if y >= FAILED_YIELD_KG:
+            #     if attempt > 1:
+            #         print(f"[exploration] accepted on attempt {attempt} (yield {y:.0f} kg)")
+            #     break
+            # if attempt == MAX_EXPLORATION_RETRIES:
+            #     print(f"[exploration] WARNING: no batch cleared {FAILED_YIELD_KG:.0f} kg in "
+            #         f"{MAX_EXPLORATION_RETRIES} attempts; keeping the last (yield {y:.0f} kg)")
+            #     break
             # Rejected -> drop its monitor entry too, so `system.monitor` stays index-aligned with
             # the kept *_samples_history (diagnostics pair the two by episode index).
-            self.system.monitor.pop()
-            print(f"[exploration] rejected batch (yield {y:.0f} kg < {FAILED_YIELD_KG:.0f} kg), "
-                  f"attempt {attempt}/{MAX_EXPLORATION_RETRIES}; re-rolling")
+            # self.system.monitor.pop()
+            # print(f"[exploration] rejected batch (yield {y:.0f} kg < {FAILED_YIELD_KG:.0f} kg), "
+            #     f"attempt {attempt}/{MAX_EXPLORATION_RETRIES}; re-rolling")
 
         self.state_samples_history.append(states)
         self.input_samples_history.append(inputs)
@@ -452,13 +490,13 @@ class PenSimMCPILCO(MCP.MC_PILCO):
                                        dtype=self.dtype, device=self.device)
         # CHANGED_THIS added
         self._anchor_vars[:, TIME_IDX] = TIME_INIT_VAR
-        
+
         print(f"[anchors] {num_anchors} launch states from {num_batches} recipe batches "
               f"(+{num_batches} into GP training set); optim_horizon_steps={self.optim_horizon_steps}")
         return self._anchor_states
 
     def setup_high_feed_probes(self, num_probes=3, levels=(0.6, 0.8, 1.0)):
-        """Roll `num_probes` FIXED, sustained-high-feed batches on a FRESH wrapper and add them
+        """Roll `num_probes` FIXED, TIME-VARYING feed-rate batches on a FRESH wrapper and add them
         straight to the GP training set. Call ONCE before reinforce() (independent of, and
         combinable with, setup_recipe_anchors).
 
@@ -477,13 +515,18 @@ class PenSimMCPILCO(MCP.MC_PILCO):
         """
         seed_offset = self.system.seed_offset
         fresh = PenSimWrapper(seed_offset=seed_offset)
+        n_decisions = int(CONTROL_H / self.T_sampling)
+        shape_names = list(PROBE_SHAPES.keys())
 
         np_state = np.random.get_state()
-        used_levels = []
+        used = []
         for i in range(num_probes):
             level = levels[i % len(levels)]
-            used_levels.append(level)
-            probe_policy = lambda state, decision_idx, level=level: np.array([level])
+            shape_name = shape_names[i % len(shape_names)]
+            profile = PROBE_SHAPES[shape_name](level, n_decisions)
+            used.append((shape_name, level))
+            probe_policy = lambda state, decision_idx, profile=profile: np.array(
+                [profile[min(int(decision_idx), len(profile) - 1)]])
             # +900 keeps these seeds inside THIS seed_offset's own 1000-wide block (see
             # config_single_phase.wrapper_par), clear of both setup_recipe_anchors' seed_offset+i
             # range and the next seed's seed_offset.
@@ -495,8 +538,8 @@ class PenSimMCPILCO(MCP.MC_PILCO):
             self.model_learning.add_data(new_state_samples=states, new_input_samples=inputs)
         np.random.set_state(np_state)
 
-        print(f"[high-feed probes] added {num_probes} sustained-feed batches at levels "
-              f"{used_levels} to the GP training set")
+        print(f"[high-feed probes] added {num_probes} time-varying batches {used} "
+              f"to the GP training set")
 
     def reinforce_policy(self, *args, **kwargs):
         if self._anchor_states is not None:

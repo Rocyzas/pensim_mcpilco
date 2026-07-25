@@ -19,7 +19,6 @@ _sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
 from diagnose_gp import reconstruct, _resolve_trial
 from mcpilco.pensim_wrapper import (PenSimWrapper, STATE_NAMES, STATE_DIM, ACTION_DIM,
                                     T_SAMPLING, CONTROL_H)
-from mcpilco.model_learning_det_time import ACTION_INPUT_IDX
 
 CHANNELS = [c for c in STATE_NAMES if c != "time"]
 CHANNEL_IDX = [STATE_NAMES.index(c) for c in CHANNELS]
@@ -42,6 +41,11 @@ def load_agent(results_dir, seed, num_trials, fast, trial):
 
 
 def lengthscale_report(agent):
+    """Per-GP lengthscales, named by looking up each GP's OWN `active_dims` rather than
+    assuming every GP shares the same (STATE_DIM + ACTION_DIM)-length input: the Viscosity GP
+    drops `time` from its active_dims (see model_learning_det_time.VISC_ACTIVE_DIMS), so its
+    lengthscale array is one entry shorter and "action" sits at a different LOCAL position than
+    for every other GP."""
     ml = agent.model_learning
     rows = []
     for k in range(ml.num_gp):
@@ -52,13 +56,18 @@ def lengthscale_report(agent):
             ls = torch.exp(gp.log_lengthscales_par) * torch.ones(
                 gp.num_features, dtype=gp.dtype, device=gp.device)
         ls = ls.detach().cpu().numpy()
-        a_val = float(ls[ACTION_INPUT_IDX])
+        active = gp.active_dims.detach().cpu().numpy()
+        names = [INPUT_NAMES[i] for i in active]
+        ls_by_name = dict(zip(names, ls))
+        a_val = ls_by_name["action"]
         large = a_val >= LARGE_ACTION_LENGTHSCALE
         flag = " <-- ACTION LENGTHSCALE LARGE (kernel may be ignoring the action)" if large else ""
-        vals = " ".join(f"{v:8.3f}" for v in ls)
-        print(f"[lengthscales] {STATE_NAMES[k]:>10}: {vals}{flag}")
+        vals = " ".join(f"{n}={v:.3f}" for n, v in zip(names, ls))
+        dropped = [n for n in INPUT_NAMES if n not in ls_by_name]
+        drop_note = f"  (no {', '.join(dropped)} input)" if dropped else ""
+        print(f"[lengthscales] {STATE_NAMES[k]:>10}: {vals}{flag}{drop_note}")
         row = {"gp": STATE_NAMES[k]}
-        row.update({f"ls_{n}": float(v) for n, v in zip(INPUT_NAMES, ls)})
+        row.update({f"ls_{n}": ls_by_name.get(n, float("nan")) for n in INPUT_NAMES})
         row["action_lengthscale"] = a_val
         row["action_ls_large"] = large
         rows.append(row)
@@ -241,7 +250,7 @@ def plot_gp_diagnostics(ls_rows, deaf_rows, out_path):
     ax1.set_xticklabels(INPUT_NAMES, rotation=45, ha="right")
     ax1.set_yticks(range(len(ls_rows)))
     ax1.set_yticklabels([r["gp"] for r in ls_rows])
-    vmax = mat.max() if mat.max() > 0 else 1.0
+    vmax = np.nanmax(mat) if np.nanmax(mat) > 0 else 1.0
     for i in range(mat.shape[0]):
         for j in range(mat.shape[1]):
             ax1.text(j, i, f"{mat[i, j]:.2f}", ha="center", va="center",
@@ -350,9 +359,9 @@ def plot_first_sign_loss(loss_rows, horizons, out_path, title_suffix=""):
 
 
 if __name__ == "__main__":
-    RESULTS_DIR = "results/single_phase/seed3_16"
+    RESULTS_DIR = "results/single_phase/seed3_33"
     SEED = 3
-    NUM_TRIALS = 4
+    NUM_TRIALS = 5
     FAST = False
     TRIAL = None
     SIM_SEED = 424242

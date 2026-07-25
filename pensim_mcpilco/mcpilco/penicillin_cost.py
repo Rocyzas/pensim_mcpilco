@@ -8,7 +8,8 @@ import torch
 import policy_learning.Cost_function as CF
 
 from mcpilco.pensim_wrapper import (STATE_NAMES, STATE_RANGES,
-                                    WT_SOFT, VISC_MAX, T_SAMPLING, K_WARM,
+                                    WT_SOFT, WT_OVERFLOW, VISC_MAX,
+                                    T_SAMPLING, K_WARM,
                                     decode_state_value)
 from utils.constants import STEP_IN_HOURS
 
@@ -18,6 +19,10 @@ VISC_IDX = STATE_NAMES.index("Viscosity")
 TIME_IDX = STATE_NAMES.index("time")
 
 VISC_SOFT_SCALE = 50.0
+# Penalty starts ramping BEFORE the hard VISC_MAX=100 envelope ceiling, so the optimiser gets
+# gradient signal while a policy is still approaching the collapse regime rather than only once
+# it has already crossed it.
+VISC_SOFT_START = 80.0
 
 _disch_int_cache = {}
 
@@ -40,6 +45,30 @@ P_MAX = float(decode_state_value("P", STATE_RANGES["P"][1]))
 WT_MAX = float(decode_state_value("Wt", STATE_RANGES["Wt"][1]))
 
 
+def _mass_kg(P, Wt):
+    """Penicillin mass held in the tank, kg. P is g/L, Wt is broth volume in L.
+
+    THE single conversion from (concentration, volume) to a mass-in-kg currency. Used both for the
+    dense reward (`_mass_change_reward` below) and, since the cost refactor, to PRICE every
+    constraint penalty in the same currency: a weight-overflow or viscosity-collapse event is
+    priced as the fraction of this in-tank mass that event puts at risk (spilled on overflow, or
+    lost to a batch abort on collapse) -- see `_ramp_severity` and `PeniConcentrationCost._terms`.
+    """
+    return P * Wt / 1000.0
+
+
+def _ramp_severity(value, soft_start, hard_limit):
+    """Dimensionless violation severity: 0 at/below `soft_start`, growing quadratically to 1 exactly
+    at `hard_limit`, unbounded above it. This is deliberately just the "how bad is it" ramp, kept
+    separate from `_mass_kg` (the "how much is at stake" pricing) so the two can be recombined
+    differently later -- e.g. a chance-constraint formulation would replace this smooth ramp with
+    the fraction of particles past `hard_limit`, while still multiplying by the SAME `_mass_kg`
+    pricing, without touching how the kg currency itself is defined.
+    """
+    span = hard_limit - soft_start
+    return torch.relu((value - soft_start) / span) ** 2
+
+
 def _mass_change_reward(cost, states_sequence, P, Wt):
     """dmass = first difference of mass=P*Wt/1000 (dmass[0] = 0), plus a discharge/harvest credit
     whenever cost.harvest_reward is True.
@@ -52,7 +81,7 @@ def _mass_change_reward(cost, states_sequence, P, Wt):
     the discharge credit for a while: the credit's code existed only as a commented-out block that
     a doc comment claimed was inert, and both statements quietly stopped being true).
     """
-    mass = P * Wt / 1000.0
+    mass = _mass_kg(P, Wt)
     dmass = torch.zeros_like(mass)
     dmass[1:] = mass[1:] - mass[:-1]
 
@@ -70,22 +99,63 @@ def _mass_change_reward(cost, states_sequence, P, Wt):
 
 class PeniConcentrationCost(CF.Expected_cost):
     def __init__(self, p_weight=None, soft_penalty=None, rate_penalty=None, risk_weight=0.0,
-                 visc_penalty=0.5, harvest_reward=True):
+                 visc_penalty=0.5, harvest_reward=True, constraint_strength=1.0):
+        """
+        Every penalty below is priced in kg-of-penicillin-equivalent (via `_mass_kg` /
+        `_ramp_severity`) BEFORE its lambda is applied, so a lambda of 1 means "trade 1 kg of yield
+        to avoid 1 kg-equivalent of this violation" -- see `_terms` for the arithmetic. The
+        parameter names are kept from the pre-refactor API for backward compatibility (existing
+        configs construct this class by keyword); only their MEANING changed, from raw unit-
+        conversion factors to interpretable per-term lambdas:
+
+          p_weight      -- kg -> cost-unit conversion for the reward AND every penalty (shared,
+                            so all terms stay in one currency; see `_terms`).
+          soft_penalty  -- lambda_weight: kg traded per kg-equivalent of tank-overflow risk.
+          visc_penalty  -- lambda_visc:   kg traded per kg-equivalent of viscosity-collapse risk.
+          rate_penalty  -- lambda_rate:   kg traded per kg-equivalent of action chatter. A
+                            smoothness preference, not a safety constraint, so it is NOT scaled by
+                            `constraint_strength` (see that parameter below).
+          risk_weight   -- lambda_risk:   kg traded per kg-equivalent of batch-OUTCOME spread
+                            (std across particles of the summed per-trajectory cost). Previously
+                            this was added outside the r-lambda*c scheme and measured PER-TIMESTEP
+                            particle spread rather than outcome spread -- see `forward`, and treat
+                            that change as a behavioural fix, not a relabelling.
+        """
         self.p_weight = p_weight
         self.soft_penalty = soft_penalty
         self.rate_penalty = rate_penalty
-        # Quadratic penalty weight on broth viscosity above VISC_MAX -- the observed collapse mode.
+        # Quadratic penalty weight on broth viscosity above VISC_SOFT_START -- the observed collapse mode.
         self.visc_penalty = visc_penalty
         # Credit penicillin removed by the recipe's discharge pulses. Defaults ON because it makes
         # the objective match batch_yield_kg; set False to reproduce the old in-tank-only reward.
         self.harvest_reward = harvest_reward
-        # Risk aversion: weight on the across-particle spread in the OPTIMISED objective.
+        # Risk aversion: weight on the batch-OUTCOME spread in the OPTIMISED objective.
         # 0.0 reproduces the stock risk-neutral expectation exactly. See `forward` below.
         self.risk_weight = risk_weight # THIS rewards small std
+        # Single global trade-off knob: scales every CONSTRAINT penalty's effective lambda
+        # (weight overflow, viscosity collapse, batch-outcome risk) together, "how conservative
+        # overall", while leaving each term's relative weighting (soft_penalty vs visc_penalty vs
+        # risk_weight) intact. action_rate is excluded -- it is a smoothness preference, not a
+        # safety constraint, and stays controlled by rate_penalty alone. Default 1.0 means "exactly
+        # what the per-term lambdas alone specify", so existing configs (which don't pass this
+        # argument) are unaffected by its introduction.
+        self.constraint_strength = constraint_strength
         super().__init__(cost_function=self._cost)
 
+    @property
+    def _lambda_weight(self):
+        return self.soft_penalty * self.constraint_strength
+
+    @property
+    def _lambda_visc(self):
+        return self.visc_penalty * self.constraint_strength
+
+    @property
+    def _lambda_risk(self):
+        return self.risk_weight * self.constraint_strength
+
     def forward(self, states_sequence, inputs_sequence, trial_index=None):
-        """Risk-sensitive objective: sum_t mean_p(cost) + risk_weight * sum_t std_p(cost).
+        """Risk-sensitive objective: sum_t mean_p(cost) + lambda_risk * std_p(sum_t cost).
 
         WHY OVERRIDE THIS
         -----------------
@@ -96,20 +166,35 @@ class PeniConcentrationCost(CF.Expected_cost):
         up in the real episodes. Penalising the spread makes the optimiser prefer policies whose
         outcome the model can actually forecast.
 
+        BEHAVIOURAL CHANGE: OUTCOME VARIANCE, NOT PER-TIMESTEP VARIANCE
+        -----------------------------------------------------------
+        The previous version summed the across-particle std AT EACH TIMESTEP: `sum_t std_p(cost)`.
+        That measures how much particles disagree step-by-step, not whether the BATCH outcome is
+        risky -- a policy whose particles wobble around a common trajectory but converge to the same
+        total cost would be penalised the same as one whose particles diverge into "collapsed" vs
+        "fine" batches. The stated objective is reducing batch-to-batch (outcome) variance, so this
+        now takes the std ACROSS PARTICLES of each particle's SUMMED trajectory cost:
+        `std_p(sum_t cost)`, computed once per rollout rather than once per timestep. This is a
+        deliberate behavioural change (not a silent refactor) -- risk_weight values tuned against
+        the old per-timestep formulation are not directly comparable to this one.
+
         THE DETACH, WHICH IS THE WHOLE POINT
         ------------------------------------
         The base class computes `torch.std(costs.detach(), 1)`, so its std is a logging quantity
         with NO gradient path. Reusing it here would move the reported cost while leaving the policy
         gradient untouched -- a silent no-op. The penalty term below is therefore computed from the
-        NON-detached costs. The second return value stays detached, so `std_cost_trial_list` and the
-        R.1b diagnostic keep exactly their previous meaning.
+        NON-detached costs. The second return value stays detached: it is the SAME outcome-std
+        quantity the risk penalty uses (previously it was the per-timestep-summed std), so
+        `std_cost_trial_list` and the R.1b diagnostic now report outcome spread, not step spread.
         """
         costs = self.cost_function(states_sequence, inputs_sequence, trial_index)
         mean_costs = torch.mean(costs, 1)
         objective = torch.sum(mean_costs)
+        trajectory_cost = torch.sum(costs, 0)  # [particles]: summed per-trajectory OUTCOME cost
+        outcome_std = torch.std(trajectory_cost)
         if self.risk_weight:
-            objective = objective + self.risk_weight * torch.sum(torch.std(costs, 1))
-        return objective, torch.sum(torch.std(costs.detach(), 1))
+            objective = objective + self._lambda_risk * outcome_std
+        return objective, torch.std(trajectory_cost.detach())
 
 
     def _dn(self, x_norm, lo, hi):
@@ -124,12 +209,17 @@ class PeniConcentrationCost(CF.Expected_cost):
         return -t["reward"] + t["soft"] + t["visc_soft"] + t["action_rate"]
 
     def _terms(self, states_sequence, inputs_sequence, trial_index=None):
-        """The cost's individual terms, unsummed, each shaped [T, particles].
+        """The cost's individual terms, unsummed, each shaped [T, particles], ALL in one currency:
+        p_weight * kg-of-penicillin-equivalent. `reward` is that currency's reference (p_weight *
+        kg of actual product); every penalty is `p_weight * lambda_term * kg_violation`, where
+        `kg_violation` is a severity ramp (`_ramp_severity`, 0..1 from soft threshold to hard limit)
+        times the mass currently at risk (`_mass_kg(P, Wt)`, i.e. what an overflow spill or a
+        collapse-driven batch abort would put at risk). A lambda of 1 therefore means "trade 1 kg of
+        yield to avoid a full-severity (at-the-hard-limit) violation of that constraint" -- see
+        experiments/cost_term_report.py, which divides every term by p_weight to read it in kg.
 
         Signs are as NAMED, not as combined: `reward` is a reward (higher is better) and the three
-        penalties are costs. `_cost` applies the signs. Divide any term by `p_weight` to read it in
-        kilograms of penicillin, which is what makes the weights comparable -- see
-        experiments/cost_term_report.py.
+        penalties are costs. `_cost` applies the signs.
         """
         P = decode_state_value("P", self._dn(states_sequence[:, :, P_IDX], *STATE_RANGES["P"]))
         Wt = decode_state_value("Wt", self._dn(states_sequence[:, :, WT_IDX], *STATE_RANGES["Wt"]))
@@ -151,28 +241,36 @@ class PeniConcentrationCost(CF.Expected_cost):
         # construction, instead of by manually toggling which formula is commented out here.
         reward = self.p_weight * _mass_change_reward(self, states_sequence, P, Wt)
 
-        # DISABLED penalties. All three are returned as zeros so `_cost` and
-        # experiments/cost_term_report.py keep their four-term contract -- restore any one by
-        # commenting the zeros line and uncommenting the formula beneath it.
+        # Mass currently held in the tank -- what a weight-overflow spill or a viscosity-driven
+        # batch abort would put at risk. The SAME currency prices both constraints (and, in
+        # `forward`, the risk term), so their lambdas are directly comparable to each other and to
+        # p_weight's kg reference.
+        mass_at_risk_kg = _mass_kg(P, Wt)
 
-        # soft: measured inert. Max Wt is 106,535 at full overfeed (a=+1, seed 700000), below
-        # the WT_SOFT[1]=1.1e5 threshold, so this never fired on any reachable trajectory.
-        # soft = torch.zeros_like(P)
-        soft = self.soft_penalty * torch.relu((Wt - WT_SOFT[1]) / 1e4) ** 2
+        # soft (weight-overflow constraint): severity ramps 0 at WT_SOFT[1] to 1 at WT_OVERFLOW,
+        # multiplied by the mass an overflow would spill. `constraint_strength` scales this term.
+        wt_severity = _ramp_severity(Wt, WT_SOFT[1], WT_OVERFLOW)
+        soft = self.p_weight * self._lambda_weight * wt_severity * mass_at_risk_kg
 
-        # visc_soft: RESTORE THIS FIRST if collapsed batches return. The seed11-14 ablation put
-        # the collapse rate at 9/44 (20%) with this off vs 5/44 (11%) with visc_penalty=0.5.
-        # That difference is not significant at n=4 seeds (Fisher p~0.4), which is why it is
-        # being tested -- but it is the only penalty with evidence behind it.
-        # visc_soft = torch.zeros_like(P)
+        # visc_soft (viscosity-collapse constraint): severity ramps 0 at VISC_SOFT_START to 1 at
+        # VISC_MAX, multiplied by the mass a collapse-driven abort would lose. Reaching full
+        # severity exactly AT the hard limit (VISC_MAX) is a deliberate change from the previous
+        # formula, which used a fixed VISC_SOFT_SCALE=50 denominator unrelated to VISC_MAX=100 and
+        # so did not reach full severity until 130 cP, well past the stated hard cap.
+        # `constraint_strength` scales this term.
         visc = self._dn(states_sequence[:, :, VISC_IDX], *STATE_RANGES["Viscosity"])
-        visc_soft = self.visc_penalty * torch.relu((visc - VISC_MAX) / VISC_SOFT_SCALE) ** 2
+        visc_severity = _ramp_severity(visc, VISC_SOFT_START, VISC_MAX)
+        visc_soft = self.p_weight * self._lambda_visc * visc_severity * mass_at_risk_kg
 
-        # action_rate: never measured. cost_term_report.py reports it INERT, but that is an
-        # artifact of its constant-action probes, not evidence. Dropping it permits chattering Fs.
+        # action_rate (smoothness preference, NOT a safety constraint -- excluded from
+        # constraint_strength): severity is the squared action step as a fraction of the largest
+        # possible step (+1 to -1, i.e. divide by 2 before squaring so a full reversal = severity
+        # 1), priced against the same mass-at-risk currency so rate_penalty is also an
+        # interpretable kg-per-kg-equivalent lambda rather than a raw unit-conversion factor.
         u = inputs_sequence[:, :, 0]
-        action_rate = torch.zeros_like(u)
-        # action_rate[1:] = self.rate_penalty * (u[1:] - u[:-1]) ** 2
+        rate_violation_kg = torch.zeros_like(u)
+        rate_violation_kg[1:] = ((u[1:] - u[:-1]) / 2.0) ** 2 * mass_at_risk_kg[1:]
+        action_rate = self.p_weight * self.rate_penalty * rate_violation_kg
 
         return {"reward": reward, "soft": soft, "visc_soft": visc_soft, "action_rate": action_rate}
 

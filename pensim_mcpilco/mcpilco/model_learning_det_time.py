@@ -1,31 +1,51 @@
-"""GP dynamics model that treats `time` as a deterministic clock rather than a learned state.
+"""GP dynamics model that treats select state channels as deterministic rather than learned.
 
-`time` stays in the state vector (so every GP still sees it as an INPUT regressor, and the
-policy still uses it as a gain-scheduling feature), but its own imagined-rollout update is
-forced to a constant, noiseless tick. This removes a pointless GP over a constant target and,
-more importantly, stops the imagined clock from random-walking over the ~114 rollout steps --
-a drifting clock would corrupt every other channel, since they all regress on time.
-See pensim_wrapper.TIME_IDX / TIME_DELTA_NORM.
+Each channel in DETERMINISTIC_CHANNELS stays in the state vector (so every GP still sees it as an
+INPUT regressor, and the policy still uses it as a feature), but its own imagined-rollout update
+is forced to an exact, noiseless delta computed from (current_state, current_input) rather than
+sampled from its GP. This removes a pointless GP over a target that is already known exactly and,
+for `time` specifically, stops the imagined clock from random-walking over the ~114 rollout steps
+-- a drifting clock would corrupt every other channel, since they all regress on time.
+
+`time`'s delta is a fixed constant (TIME_DELTA_NORM), which is why this is a registry of
+(state, input) -> delta rules keyed by channel index, rather than one hardcoded branch per
+channel -- see pensim_wrapper.TIME_IDX/TIME_DELTA_NORM.
 """
 
+import numpy as np
 import torch
 
 import model_learning.Model_learning as ML
 import gpr_lib.GP_prior.Stationary_GP as SGP
 
-from mcpilco.pensim_wrapper import STATE_NAMES, STATE_DIM, TIME_IDX, TIME_DELTA_NORM, TIME_INIT_VAR
+from mcpilco.pensim_wrapper import (STATE_NAMES, STATE_DIM, ACTION_DIM, TIME_IDX, TIME_DELTA_NORM,
+                                    TIME_INIT_VAR)
 
 WT_GP_IDX = STATE_NAMES.index("Wt")
-# gp_input = concat(state, action) (Model_learning.data_to_gp_input); action is the only, last
-# input column, so its position in the lengthscales vector is always STATE_DIM.
-ACTION_INPUT_IDX = STATE_DIM
+
+# Viscosity's action-lengthscale sits at 11.6-39.7 in every reward-shaping config tried (see
+# Model_learning_RBF_det_time docstring) -- the GP never resolves an action effect. IndPenSim's
+# own viscosity correlation is C(t) ~= f(X) (biomass-driven), not a function of batch time, so
+# `time` is the likeliest channel silently absorbing the predictive power that should go to `X`.
+# Dropping it from just this one GP's inputs is a one-line active_dims change. It is combined below
+# with the empirical recipe-baseline prior mean (RECIPE_MEAN_CHANNELS) -- but that prior is still
+# only an action-INDEPENDENT time-indexed baseline (the same kind P previously had), not the
+# action-dependent fix an X/a_0-driven prior would be: a_0 (the real ODE's biomass term) is
+# exposed by the simulator
+# (PenSimPy's `bx.a0`) during real rollouts, but get_mean(X) is also evaluated on imagined MC-PILCO
+# particles at planning time, where X is only (state, action) -- a_0 is never available there, so
+# it cannot be turned into a genuine action-dependent prior without extending the tracked state.
+VISC_GP_IDX = STATE_NAMES.index("Viscosity")
+VISC_ACTIVE_DIMS = np.array([i for i in range(STATE_DIM + ACTION_DIM) if i != TIME_IDX])
 
 # Channels given the empirical recipe-trajectory prior mean (see recipe_trajectory_mean.py).
 # `Wt` is deliberately NOT here -- it has the exact analytic mass balance, which is strictly better.
-# Start with {"P"} alone: it is the channel the cost depends on, so its effect is measurable in
-# isolation via the R.1b particle-spread and C.2b coverage diagnostics. Add "X" only once P is shown
-# to help; changing both at once makes the result uninterpretable.
-RECIPE_MEAN_CHANNELS = {"P"}
+# `P` was here first and has been moved back to plain RBF (see get_gp): its ordinary exploration
+# data already gave it a low sigma_n without the prior-mean shortcut, and this empirical baseline
+# reuse is instead for `Viscosity`, whose action-independent off-data behaviour ("freeze in place")
+# is the failure mode this prior mean fixes -- see the VISC_GP_IDX comment above for why an
+# action-dependent prior isn't available here.
+RECIPE_MEAN_CHANNELS = {"Viscosity"}
 RECIPE_MEAN_GP_IDX = {STATE_NAMES.index(c) for c in RECIPE_MEAN_CHANNELS}
 
 _wt_mb_cache = {}
@@ -101,6 +121,18 @@ class RBF_RecipeMean(SGP.RBF):
         return super(RBF_RecipeMean, self).get_mean(X) + self._recipe_mean.delta_norm(X)
 
 
+def _time_delta(current_state, current_input):
+    return torch.full_like(current_state[:, TIME_IDX:TIME_IDX + 1], TIME_DELTA_NORM)
+
+
+# channel index -> (delta_rule(current_state, current_input) -> [N, 1] tensor, delta variance).
+# Registry keyed by index rather than one hardcoded branch per channel in
+# get_next_state_from_gp_output, so more deterministic channels can be added the same way.
+DETERMINISTIC_CHANNELS = {
+    TIME_IDX: (_time_delta, TIME_INIT_VAR),
+}
+
+
 class Model_learning_RBF_det_time(ML.Model_learning_RBF):
     """RBF-GP dynamics with a deterministic `time` channel and prior means on the integrating
     channels: an analytic mass balance for `Wt`, measured recipe trajectories for
@@ -120,6 +152,19 @@ class Model_learning_RBF_det_time(ML.Model_learning_RBF):
     def get_gp(self, gp_index, init_dict):
         if gp_index == WT_GP_IDX:
             return RBF_WtMassBalance(**init_dict)
+        if gp_index == VISC_GP_IDX:
+            # New dict, not a mutation of `init_dict`: config_single_phase.py builds ONE
+            # init_dict_RBF and reuses the SAME object for every gp_index's list entry, so
+            # mutating it here would silently drop `time` from every other channel's GP too.
+            # Checked (and its active_dims fix applied) BEFORE the RECIPE_MEAN_GP_IDX branch below:
+            # RBF_RecipeMean(**init_dict) would otherwise use init_dict's default (all-6-dim)
+            # active_dims, silently undoing the drop-`time` fix for Viscosity.
+            visc_init_dict = dict(init_dict, active_dims=VISC_ACTIVE_DIMS,
+                                  lengthscales_init=np.delete(
+                                      np.asarray(init_dict["lengthscales_init"]), TIME_IDX))
+            if gp_index in RECIPE_MEAN_GP_IDX:
+                return RBF_RecipeMean(channel=STATE_NAMES[gp_index], **visc_init_dict)
+            return SGP.RBF(**visc_init_dict)
         if gp_index in RECIPE_MEAN_GP_IDX:
             return RBF_RecipeMean(channel=STATE_NAMES[gp_index], **init_dict)
         return super(Model_learning_RBF_det_time, self).get_gp(gp_index, init_dict)
@@ -138,22 +183,30 @@ class Model_learning_RBF_det_time(ML.Model_learning_RBF):
     def get_next_state_from_gp_output(self, current_state, current_input,
                                       gp_output_mean_list, gp_output_var_list,
                                       particle_pred=True):
-        # Force the time channel's predicted delta to the exact clock tick. Its variance must be a
-        # tiny positive jitter, not 0: the base builds one Normal over the whole state vector and
-        # torch requires scale > 0. The jitter's sample is then discarded below, so time advances
-        # deterministically and identically across all particles (no random walk over the rollout).
-        # The time GP still trains/predicts and is simply ignored for this channel.
-        gp_output_mean_list[TIME_IDX] = torch.full_like(
-            gp_output_mean_list[TIME_IDX], TIME_DELTA_NORM)
-        gp_output_var_list[TIME_IDX] = torch.full_like(
-            gp_output_var_list[TIME_IDX], TIME_INIT_VAR)
+        # Force every DETERMINISTIC_CHANNELS entry's predicted delta to its exact rule. Variance
+        # must be a tiny positive jitter, not 0: the base builds one Normal over the whole state
+        # vector and torch requires scale > 0. The jitter's sample is discarded below (each channel
+        # is spliced back to its exact value), so these channels evolve deterministically and
+        # identically across all particles -- no random walk over the rollout. Their GPs still
+        # train/predict and are simply ignored.
+        exact_deltas = {}
+        for idx, (delta_rule, var) in DETERMINISTIC_CHANNELS.items():
+            delta = delta_rule(current_state, current_input)
+            exact_deltas[idx] = delta
+            gp_output_mean_list[idx] = delta
+            gp_output_var_list[idx] = torch.full_like(gp_output_var_list[idx], var)
+
         next_states, delta_mean, delta_var = super().get_next_state_from_gp_output(
             current_state, current_input, gp_output_mean_list, gp_output_var_list,
             particle_pred)
-        # Replace the sampled time with the exact deterministic tick (autograd-safe, no in-place).
-        det_time = current_state[:, TIME_IDX:TIME_IDX + 1] + TIME_DELTA_NORM
-        next_states = torch.cat(
-            [next_states[:, :TIME_IDX], det_time, next_states[:, TIME_IDX + 1:]], dim=1)
+
+        # Replace each deterministic channel's sampled value with its exact one (autograd-safe,
+        # no in-place).
+        for idx, delta in exact_deltas.items():
+            exact_next = current_state[:, idx:idx + 1] + delta
+            next_states = torch.cat(
+                [next_states[:, :idx], exact_next, next_states[:, idx + 1:]], dim=1)
+
         # Keep particles inside the normalised physical box (see `state_clamp` above). clamp is
         # out-of-place (autograd-safe) and has zero gradient at the bound, so a particle pinned at
         # the ceiling stops contributing runaway gradients to the policy optimiser.

@@ -1,4 +1,5 @@
-"""Recipe-trajectory prior mean for the integrating channels (`P`, and optionally `X`).
+"""Recipe-trajectory prior mean, currently used for `Viscosity` (see RECIPE_MEAN_CHANNELS in
+model_learning_det_time.py).
 
 WHY THIS EXISTS
 ---------------
@@ -6,16 +7,17 @@ Every GP predicts a DELTA and the rollout integrates it (`Model_learning.get_nex
 `next_states = current_state + delta_sample`). A plain RBF has a ZERO prior mean, so wherever the GP
 has no nearby data its predicted delta decays to 0 and the channel FREEZES IN PLACE.
 
-For an equilibrium channel that is harmless. For the accumulating channels {Wt, X, P} it is wrong in
-one direction: "no data here" produces "stopped growing", a systematic underestimate rather than a
-symmetric uncertainty. Integrated over the ~46-decision horizon those errors compound -- which is why
-a one-step R^2 of ~0.99 coexists with a multi-step particle spread ~25x the mean cost (see the R.1b
-diagnostic in evaluations/Rollouts.ipynb). The one-step metric never sees the integration.
+For an equilibrium channel that is harmless. For an accumulating channel it is wrong in one direction:
+"no data here" produces "stopped growing/changing", a systematic underestimate rather than a symmetric
+uncertainty. Integrated over the ~46-decision horizon those errors compound -- which is why a one-step
+R^2 of ~0.99 coexists with a multi-step particle spread ~25x the mean cost (see the R.1b diagnostic in
+evaluations/Rollouts.ipynb). The one-step metric never sees the integration.
 
 `wt_mass_balance.WtMassBalance` already fixed this for `Wt` by supplying the KNOWN recipe mass balance
-as a prior mean, leaving the RBF to model only the residual. `P` and `X` cannot get the same treatment
-from first principles: their true ODE terms are Monod kinetics in substrate and dissolved oxygen, and
-neither S nor DO2 is in this 4-channel state.
+as a prior mean, leaving the RBF to model only the residual. `Viscosity` cannot get the same treatment
+from first principles: its true ODE term needs `a_0`, an internal hyphal-growth sub-state that isn't
+part of this 5-channel state (and isn't recoverable at planning time even though the simulator exposes
+it during real rollouts -- see the VISC_GP_IDX comment in model_learning_det_time.py).
 
 So this module supplies an EMPIRICAL prior mean instead: the mean per-decision delta measured from
 pure-recipe (a = 0) batches, indexed by batch time. The decomposition mirrors the way the ACTION is
@@ -32,10 +34,15 @@ bias the very effect the agent is trying to exploit.
 
 WHY IT IS EVALUATED IN NORMALISED-ENCODED SPACE
 ----------------------------------------------
-The stored channels for {Wt, X, P} are normalise(log(.)), so a delta in this space is a LOG-RATIO --
-"grew by 4% this window" -- not an absolute increment. Adding the recipe's log-delta to a particle
-whose biomass is already above the recipe therefore means "grow by the same proportion", which
-extrapolates far better than transplanting an absolute increment.
+The stored channels for {Wt, X, P} (see STATE_LOG_CHANNELS) are normalise(log(.)), so a delta in this
+space is a LOG-RATIO -- "grew by 4% this window" -- not an absolute increment. Adding the recipe's
+log-delta to a particle whose biomass is already above the recipe therefore means "grow by the same
+proportion", which extrapolates far better than transplanting an absolute increment.
+
+`Viscosity` is NOT in STATE_LOG_CHANNELS, so for it this mean is a plain normalised additive delta,
+not a log-ratio: it still fixes "freeze in place" off-data (reverting to "changes like the recipe"
+rather than "stops changing"), just without the proportional-growth extrapolation property described
+above -- that property is specific to log-encoded channels.
 
 NOT CACHED ON DISK, on purpose -- same rule as `_measure_init_state_norm`: the values depend on
 STATE_RANGES / WARMUP_H / the encoding, and a stale cache keyed on anything less would silently

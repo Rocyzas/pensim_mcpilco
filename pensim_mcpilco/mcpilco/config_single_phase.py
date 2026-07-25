@@ -13,7 +13,7 @@ import gpr_lib.Likelihood.Gaussian_likelihood as Likelihood
 import model_learning.Model_learning as ML
 import policy_learning.Policy as Policy
 
-from mcpilco.penicillin_cost import PeniConcentrationCost, PeniMassChangeCost
+from mcpilco.penicillin_cost import PeniConcentrationCost, PeniConcentrationDenseCost, PeniMassChangeCost
 
 # CHANGED_THIS
 from mcpilco.model_learning_det_time import Model_learning_RBF_det_time
@@ -29,7 +29,7 @@ from mcpilco.pensim_wrapper import (STATE_DIM,
 
 def get_config(seed=1, num_trials=10, fast=False, dtype=torch.float64, device=torch.device("cuda" if torch.cuda.is_available() else "cpu"),
                optim_horizon_steps=None, num_anchor_batches=0, num_anchors=12, anchor_var=0.01,
-               risk_weight=0.0, visc_penalty=0.5, harvest_reward=True,
+               risk_weight=0.0, visc_penalty=0.02, harvest_reward=True, constraint_strength=1.0,
                num_high_feed_probes=0, high_feed_levels=(0.6, 0.8, 1.0)):
     torch.manual_seed(seed)
     np.random.seed(seed)
@@ -112,18 +112,41 @@ def get_config(seed=1, num_trials=10, fast=False, dtype=torch.float64, device=to
         "rand_exploration_policy_par": rand_exploration_policy_par,
         "f_control_policy": Policy.Sum_of_gaussians,
         "control_policy_par": control_policy_par,
-        "f_cost_function": PeniConcentrationCost,
-        # 'f_cost_function': PeniMassChangeCost,
+        # "f_cost_function": PeniConcentrationDenseCost,
+        'f_cost_function': PeniMassChangeCost,
 
-        # risk_weight scales the across-particle std IN THE OPTIMISED OBJECTIVE (0.0 = stock
-        # risk-neutral mean). The std runs ~25x the mean cost here, so useful values are small:
-        # ~0.005-0.02 makes the penalty roughly 20% of the objective; >=0.1 swamps the yield signal.
-        # visc_penalty guards the observed collapse mode (broth thickens -> O2 transfer fails ->
-        # product degrades); harvest_reward credits penicillin removed by the discharge pulses, which
-        # the in-tank-only reward discarded (~20% of batch_yield_kg).
-        "cost_function_par": {"p_weight": 0.05, "soft_penalty": 0.5, "rate_penalty": 0.5,
-                              "risk_weight": risk_weight, "visc_penalty": visc_penalty,
-                              "harvest_reward": harvest_reward},
+        # Every penalty below is now priced in kg-of-penicillin-equivalent BEFORE its lambda is
+        # applied (see mcpilco/penicillin_cost.py's module/class docstrings), so these numbers are
+        # NOT comparable to the pre-refactor values -- 0.5 used to be an inert unit-conversion
+        # accident for visc_penalty and is now ~50x over-priced (confirmed via
+        # experiments/cost_term_report.py: charges ~15,000 kg for a batch that actually loses
+        # ~2,900 kg). Defaults below are a starting point read off that script's sweep, not a
+        # finished calibration -- re-run it (it prints the reward-vs-batch_yield_kg guard and the
+        # per-term verdicts) before trusting a change here, and re-check against GP-PREDICTED
+        # rollouts before treating it as final: viscosity is over-predicted ~4.5x in training
+        # (evaluate_GPs.ipynb G.7), so a value calibrated on real trajectories fires harder there.
+        #
+        # soft_penalty (lambda_weight): tank-overflow constraint. Left at the old value -- it is
+        # measured INERT on every reachable trajectory (Wt never nears WT_SOFT), so its magnitude
+        # doesn't currently matter, but it's still scaled by constraint_strength if Wt behaviour
+        # ever changes.
+        # rate_penalty (lambda_rate): action-chatter SMOOTHNESS PREFERENCE, not a safety constraint
+        # -- NOT scaled by constraint_strength (see penicillin_cost.py). 0.02 charges ~1,100 kg
+        # (~31% of the good batch's own reward) on the worst-case every-step +/-1 alternation probe,
+        # which no learned policy sits at continuously, so this is a soft nudge, not a hard limit.
+        # visc_penalty (lambda_visc): viscosity-collapse constraint, scaled by constraint_strength.
+        # risk_weight (lambda_risk): batch-OUTCOME spread (std across particles of the summed
+        # trajectory cost -- a behavioural fix from the old per-timestep spread, see
+        # PeniConcentrationCost.forward), also scaled by constraint_strength. 0.0 = risk-neutral.
+        # The old "~25x the mean, use 0.005-0.02" guidance was calibrated against the OLD
+        # per-timestep-summed std and does NOT carry over -- re-derive a working range against
+        # this outcome-std formulation (e.g. via std_cost_trial_list) before relying on it.
+        # constraint_strength: single global knob, multiplies soft_penalty, visc_penalty AND
+        # risk_weight together ("how conservative overall"); 1.0 = exactly what those three specify.
+        "cost_function_par": {"p_weight": 0.05, "soft_penalty": 0.05, "rate_penalty": 0.02,
+                              "risk_weight": 0.0, "visc_penalty": 0.02,
+                              "harvest_reward": harvest_reward,
+                              "constraint_strength": 1.5},
         # CHANGED_THIS
         "std_meas_noise": std_meas_noise,
         "log_path": f"results/single_phase/seed{seed}",
@@ -149,7 +172,7 @@ def get_config(seed=1, num_trials=10, fast=False, dtype=torch.float64, device=to
         "p_drop_reduction": 0.1,
         "alpha_diff_cost": 0.99,
         "min_diff_cost": 0.05,
-        "num_min_diff_cost": 25,
+        "num_min_diff_cost": 50,
         # CHANGED_THIS from 200
         "min_step": n_opt_steps // 3,
         "lr_min": 0.001, #"lr_min": 0.001,
