@@ -135,7 +135,7 @@ from mcpilco.pensim_wrapper import (PenSimWrapper, CONTROL_H, T_SAMPLING, FS_SCA
                                     VISC_MAX, WT_OVERFLOW, batch_yield_kg)
 from mcpilco.penicillin_cost import (PeniConcentrationDenseCost, PeniConcentrationChangeCost,
                                      PeniMassTerminalCost, PeniMassChangeCost)
-from cost_offmanifold_probe import segment_policy, score, N_DECISIONS
+from pensim_mcpilco.evaluations.cost_offmanifold_probe import segment_policy, score, N_DECISIONS
 
 ALPHA = 0.05
 N_COMPARISONS = 4  # one per reward-function variant -- for Bonferroni correction

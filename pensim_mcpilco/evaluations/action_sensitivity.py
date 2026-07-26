@@ -16,7 +16,7 @@ _sys.path.insert(0, _ROOT)
 _sys.path.insert(0, _os.path.dirname(_ROOT))
 _sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
 
-from diagnose_gp import reconstruct, _resolve_trial
+from pensim_mcpilco.evaluations.diagnose_gp import reconstruct, _resolve_trial
 from mcpilco.pensim_wrapper import (PenSimWrapper, STATE_NAMES, STATE_DIM, ACTION_DIM,
                                     T_SAMPLING, CONTROL_H)
 
