@@ -7,7 +7,7 @@
 
 set -euo pipefail
 
-ARGS=(--seed 0 --num_trials 7)
+ARGS=(--seed 20 --num_trials 7 --out_dir /home/s2889898/Diss/pensim_mcpilco/pensim_mcpilco/results/cluster/full/seed20_0)
 
 MARKER="experiments/02_mcpilco_single_phase.py"
 

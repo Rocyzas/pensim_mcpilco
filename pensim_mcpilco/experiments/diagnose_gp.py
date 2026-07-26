@@ -67,7 +67,13 @@ def reconstruct(seed, num_trials, fast, log, idx):
     params = log[f"parameters_gp_{idx}"]
     for k in range(ml.num_gp):
         ml.gp_list[k].load_state_dict(params[k])   # restore TRAINED hyperparameters
-        ml.norm_list[k] = torch.max(torch.abs(ml.gp_output_list[k]))  # train-time output norm
+        # Only re-derive the training-time output norm if the model was actually trained with
+        # flg_norm=True -- otherwise it was trained (and its variance calibrated) against norm=1,
+        # and imposing a non-unity norm here would corrupt every predicted-variance number by
+        # norm_list[k]**2 without ever having been used during training.
+        ml.norm_list[k] = (torch.max(torch.abs(ml.gp_output_list[k]))
+                          if getattr(ml, "flg_norm", False)
+                          else torch.tensor(1.0, dtype=agent.dtype, device=agent.device))
     with torch.no_grad():
         for k in range(ml.num_gp):
             ml.pretrain_gp(k)                       # rebuild alpha / SOD caches (prints MSE)
