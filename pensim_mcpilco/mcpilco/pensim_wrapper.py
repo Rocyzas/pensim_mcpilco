@@ -54,6 +54,12 @@ K_WARM = max(1, int(round(WARMUP_H / STEP_IN_HOURS)))
 WARMUP_H_EFF = K_WARM * STEP_IN_HOURS
 CONTROL_H = 230.0 - WARMUP_H_EFF
 
+# Manual dual-phase pivot: decision index at which DualPhaseModelLearning switches from
+# phase-1 to phase-2 GPs (see model_learning_dual_phase.py). Decision index, not hour count,
+# since that's what PenSimMCPILCOMultiPhase.apply_policy/rollout iterate over.
+PIVOT_HOURS = 100.0
+PIVOT_STEP = int(round(PIVOT_HOURS / T_SAMPLING))
+
 FPAA_MIN, FPAA_MAX = 0.0, 15.0
 
 # 1 = 100%
@@ -553,3 +559,38 @@ class PenSimMCPILCO(MCP.MC_PILCO):
         if self.optim_horizon_steps is not None and "T_control" in kwargs:
             kwargs["T_control"] = min(int(kwargs["T_control"]), int(self.optim_horizon_steps))
         return super().apply_policy(*args, **kwargs)
+
+
+class PenSimMCPILCOMultiPhase(PenSimMCPILCO):
+    """Dual-phase variant: self.model_learning is a DualPhaseModelLearning (see
+    model_learning_dual_phase.py) that routes get_next_state to phase-1/phase-2 GPs based on
+    a decision-step counter. That counter must be reset to 0 at the start of every rollout
+    (apply_policy during policy optimisation, and the diagnostic rollout() in MC_PILCO) --
+    both call get_next_state sequentially in decision order, so resetting once up front and
+    letting the wrapper self-increment is enough to keep it aligned with absolute decision
+    time.
+
+    setup_recipe_anchors/setup_high_feed_probes/optim_horizon_steps are unsupported here:
+    they launch particles from arbitrary/relative batch times, which the phase router (keyed
+    on ROLLOUT-RELATIVE step, assumed == absolute decision index) cannot interpret correctly.
+    """
+
+    def apply_policy(self, *args, **kwargs):
+        assert self.optim_horizon_steps is None, (
+            "optim_horizon_steps is not supported with PenSimMCPILCOMultiPhase")
+        self.model_learning.reset_step_counter()
+        return super().apply_policy(*args, **kwargs)
+
+    def rollout(self, *args, **kwargs):
+        self.model_learning.reset_step_counter()
+        return super().rollout(*args, **kwargs)
+
+    def setup_recipe_anchors(self, *args, **kwargs):
+        raise NotImplementedError(
+            "setup_recipe_anchors is not supported with PenSimMCPILCOMultiPhase "
+            "(anchor launch states don't carry the absolute decision time the phase "
+            "router needs)")
+
+    def setup_high_feed_probes(self, *args, **kwargs):
+        raise NotImplementedError(
+            "setup_high_feed_probes is not supported with PenSimMCPILCOMultiPhase")
