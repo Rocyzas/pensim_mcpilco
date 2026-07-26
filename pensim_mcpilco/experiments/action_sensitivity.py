@@ -98,6 +98,21 @@ def action_deafness_report(agent, n_sweep=21):
     return rows
 
 
+def signal_noise_report(agent):
+    ml = agent.model_learning
+    rows = []
+    for k in range(ml.num_gp):
+        gp = ml.gp_list[k]
+        signal_sd = float(torch.sqrt(torch.exp(gp.log_lambda_par)).detach().cpu())
+        noise_sd = float(torch.sqrt(gp.get_sigma_n_2()).detach().cpu())
+        ratio = signal_sd / noise_sd if noise_sd else float("inf")
+        print(f"[signal-noise] {STATE_NAMES[k]:>10}: signal_sd={signal_sd:.5f} "
+              f"noise_sd={noise_sd:.5f} ratio={ratio:.2f}")
+        rows.append({"gp": STATE_NAMES[k], "signal_sd": signal_sd, "noise_sd": noise_sd,
+                     "ratio": ratio})
+    return rows
+
+
 def true_action_effect(seed, j, delta, base_level=0.0):
     base = PenSimWrapper(seed_offset=0)
     pert = PenSimWrapper(seed_offset=0)
@@ -241,8 +256,8 @@ def save_csv(rows, path, fieldnames):
     print(f"saved {path}")
 
 
-def plot_gp_diagnostics(ls_rows, deaf_rows, out_path):
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(13, 5))
+def plot_gp_diagnostics(ls_rows, deaf_rows, sn_rows, out_path):
+    fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(18, 5))
 
     mat = np.array([[r[f"ls_{n}"] for n in INPUT_NAMES] for r in ls_rows])
     im = ax1.imshow(mat, cmap="viridis", aspect="auto")
@@ -270,6 +285,18 @@ def plot_gp_diagnostics(ls_rows, deaf_rows, out_path):
     ax2.set_title("action-sweep spread vs noise floor (red = deaf)")
     ax2.legend(fontsize=8)
     ax2.grid(alpha=0.3, axis="y")
+
+    x3 = np.arange(len(sn_rows))
+    signal_sds = [r["signal_sd"] for r in sn_rows]
+    noise_sds = [r["noise_sd"] for r in sn_rows]
+    ax3.bar(x3 - width / 2, signal_sds, width, color="C0", label="signal sd (sqrt lambda)")
+    ax3.bar(x3 + width / 2, noise_sds, width, color="C3", label="noise sd (sigma_n)")
+    ax3.set_yscale("log")
+    ax3.set_xticks(x3)
+    ax3.set_xticklabels([r["gp"] for r in sn_rows])
+    ax3.set_title("signal vs noise per channel\nnoise near signal = channel not being explained")
+    ax3.legend(fontsize=8)
+    ax3.grid(alpha=0.3, axis="y", which="both")
 
     fig.tight_layout()
     fig.savefig(out_path)
@@ -389,6 +416,11 @@ if __name__ == "__main__":
     save_csv(deaf_rows, out_dir / "action_sensitivity_deafness.csv",
              ["gp", "spread", "sigma_n", "deaf"])
 
+    print("\n--- signal vs noise report ---")
+    sn_rows = signal_noise_report(agent)
+    save_csv(sn_rows, out_dir / "action_sensitivity_signal_noise.csv",
+             ["gp", "signal_sd", "noise_sd", "ratio"])
+
     print("\n--- true vs model action sensitivity (on-manifold, a=0 baseline) ---")
     rows, phase_channel_stats, agree, total = sensitivity_table(agent, SIM_SEED, J_GRID, DELTAS)
     save_csv(rows, out_dir / "action_sensitivity_table.csv",
@@ -403,7 +435,7 @@ if __name__ == "__main__":
     save_csv(summary_rows, out_dir / "action_sensitivity_summary.csv",
              ["phase", "channel", "agree", "total", "fraction"])
 
-    plot_gp_diagnostics(ls_rows, deaf_rows, out_dir / "action_sensitivity_gp_diagnostics.png")
+    plot_gp_diagnostics(ls_rows, deaf_rows, sn_rows, out_dir / "action_sensitivity_gp_diagnostics.png")
     plot_sensitivity(rows, out_dir / "action_sensitivity_scatter.png")
 
     print("\n--- multi-step sustained-feed divergence (on-manifold, a=0 baseline) ---")

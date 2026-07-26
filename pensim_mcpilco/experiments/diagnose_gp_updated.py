@@ -222,8 +222,8 @@ if __name__ == "__main__":
     p.add_argument("--trial", type=int, default=None, help="trial index (default: last saved)")
     p.add_argument("--num_trials", type=int, default=2, help="must match the run's config")
     p.add_argument("--fast", action="store_true", help="must match the run's config")
-    p.add_argument("--optim_horizon", type=int, default=25, help="H used in training (marks the optimiser window)")
-    p.add_argument("--num_anchors", type=int, default=12, help="recipe anchor launch points to probe")
+    p.add_argument("--optim_horizon", type=int, default=0, help="H used in training (marks the optimiser window)")
+    p.add_argument("--num_anchors", type=int, default=0, help="recipe anchor launch points to probe")
     p.add_argument("--results_dir", type=str, default="results/single_phase/_mo_on")
     args = p.parse_args()
     main(args.seed, args.trial, args.num_trials, args.fast, args.optim_horizon,

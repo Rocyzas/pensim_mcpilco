@@ -109,11 +109,34 @@ seed3_15 - identical with seed3_14 just with the flag_norm=False
     one problem left is that P is not sensitive enough.
 seed3_16 - checking if adding '--num_high_feed_probes 3' would fix the P sensitivity.
     Watch two numbers: P's spread/σ_n ratio, and the model/true ratio at j=8, a=+1.0. If that ratio moves from 0.03 toward 0.3+, data was the binding constraint.
+seed3_17 - same as 3_16, but now with Lagged actions (EMA of past actions to the state).
+    did not fix the issue, i need to fix the The identified collinearity.
+seed3_18 same but with a collinearlity fix
+seed3_19 had the fix for Viscosity penalty ramp, Viscosity GP inputs 
 
+seed3_20 now has the fix for the action_rate penalty (uncommented) - GOOD yield
+    so basically everything the same but with action_rate penalty enabled
 
+seed3_31 - changed the reward function to PeniMassChangeCost. - checking different cost function
+seed4_2 - PeniConcentrationCost, seed 4. Same as before. checking generalisability.
+
+seed3_24 - PeniMassChangeCost cost, changed T_sampling=2
+seed3_26 - ALL yields above. T_sampling 5, more epochs tho.
 
 Added DO2
 seed3_9 - rbf on V,X,P(fix), num_min_diff_cost=25 + --num_high_feed_probes 3
+
+
+
+removed EMAn state
+seed3_30 and 31 differs in cost function only. Both achieve above yield, both rollouts are good
+    Masschange seems to be more realiable but not much increase
+    PenicillinConc achieves higher yield, but at risk of collapse
+        both are good tho, both used probes
+
+seed3_32/33 - same as above, but removed probes (seeing how does policy learn without them)
+    preparing for potential AEPILCO implementation
+    
 
 
 PLAN
