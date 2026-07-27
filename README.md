@@ -147,6 +147,17 @@ seed3_36 will be with Visc and P kernel fix with no probes (T=5)
 seed3_37 will be with Visc and P kernel fix with probes (T=5)
 
 
+<!-- just adding another seed -->
+Cost=Mass, now Time is back as an input to viscosity.
+seed4_6 will be with Visc and P kernel fix with no probes (T=5)
+seed4_7 will be with Visc and P kernel fix with probes (T=5)
+seed4_2 (multi-phase) no probes
+
+multi
+seed3_3 and seed4_3 used 100 pivot
+seed3_4 and seed4_4 used blended pivot
+
+
 seed3_103 = seed3_104 - MassFunc, T=2, no probs
 seed3_100 =           - PeniConc  T=2, no prbs, 
 

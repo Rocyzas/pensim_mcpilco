@@ -57,7 +57,8 @@ CONTROL_H = 230.0 - WARMUP_H_EFF
 # Manual dual-phase pivot: decision index at which DualPhaseModelLearning switches from
 # phase-1 to phase-2 GPs (see model_learning_dual_phase.py). Decision index, not hour count,
 # since that's what PenSimMCPILCOMultiPhase.apply_policy/rollout iterate over.
-PIVOT_HOURS = 100.0
+# PIVOT_HOURS = 100.0
+PIVOT_HOURS = 55.0
 PIVOT_STEP = int(round(PIVOT_HOURS / T_SAMPLING))
 
 FPAA_MIN, FPAA_MAX = 0.0, 15.0
@@ -126,7 +127,7 @@ VISC_MAX = 100.0 # was 150, but indpensim use 100, changing.
 # collapsed. Such batches are discarded and re-rolled rather than fed to the GPs, so the initial
 # model is not built on failed batches (see PenSimMCPILCO.get_data_from_system).
 # FAILED_YIELD_KG = 2000.0
-MAX_EXPLORATION_RETRIES = 20
+# MAX_EXPLORATION_RETRIES = 20
 
 # Reserved seed block for population-level measurement rollouts (x0, recipe-trajectory prior means).
 # These measure statistics that should be independent of the run seed, so they must stay clear of

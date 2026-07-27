@@ -12,39 +12,37 @@ for `time` specifically, stops the imagined clock from random-walking over the ~
 channel -- see pensim_wrapper.TIME_IDX/TIME_DELTA_NORM.
 """
 
-import numpy as np
 import torch
 
 import model_learning.Model_learning as ML
 import gpr_lib.GP_prior.Stationary_GP as SGP
 
-from mcpilco.pensim_wrapper import (STATE_NAMES, STATE_DIM, ACTION_DIM, TIME_IDX, TIME_DELTA_NORM,
-                                    TIME_INIT_VAR)
+from mcpilco.pensim_wrapper import STATE_NAMES, TIME_IDX, TIME_DELTA_NORM, TIME_INIT_VAR
 
 WT_GP_IDX = STATE_NAMES.index("Wt")
-
-# Viscosity's action-lengthscale sits at 11.6-39.7 in every reward-shaping config tried (see
-# Model_learning_RBF_det_time docstring) -- the GP never resolves an action effect. IndPenSim's
-# own viscosity correlation is C(t) ~= f(X) (biomass-driven), not a function of batch time, so
-# `time` is the likeliest channel silently absorbing the predictive power that should go to `X`.
-# Dropping it from just this one GP's inputs is a one-line active_dims change. It is combined below
-# with the empirical recipe-baseline prior mean (RECIPE_MEAN_CHANNELS) -- but that prior is still
-# only an action-INDEPENDENT time-indexed baseline (the same kind P previously had), not the
-# action-dependent fix an X/a_0-driven prior would be: a_0 (the real ODE's biomass term) is
-# exposed by the simulator
-# (PenSimPy's `bx.a0`) during real rollouts, but get_mean(X) is also evaluated on imagined MC-PILCO
-# particles at planning time, where X is only (state, action) -- a_0 is never available there, so
-# it cannot be turned into a genuine action-dependent prior without extending the tracked state.
-VISC_GP_IDX = STATE_NAMES.index("Viscosity")
-VISC_ACTIVE_DIMS = np.array([i for i in range(STATE_DIM + ACTION_DIM) if i != TIME_IDX])
 
 # Channels given the empirical recipe-trajectory prior mean (see recipe_trajectory_mean.py).
 # `Wt` is deliberately NOT here -- it has the exact analytic mass balance, which is strictly better.
 # `P` was here first and has been moved back to plain RBF (see get_gp): its ordinary exploration
 # data already gave it a low sigma_n without the prior-mean shortcut, and this empirical baseline
 # reuse is instead for `Viscosity`, whose action-independent off-data behaviour ("freeze in place")
-# is the failure mode this prior mean fixes -- see the VISC_GP_IDX comment above for why an
-# action-dependent prior isn't available here.
+# is the failure mode this prior mean fixes.
+#
+# Viscosity's GP used to also drop `time` from its active_dims, on the theory that `time` (rather
+# than `X`) was absorbing the action's predictive power -- justified at the time by an observed
+# action-lengthscale of 11.6-39.7 against every other channel resolving the action fine. Re-checked
+# against action_sensitivity.py's saved diagnostics from later runs (after the recipe-mean prior
+# and high-feed probes were added): that outlier is gone: Viscosity's action-lengthscale (~7-9) now
+# sits in the same range as every other channel's, including ones that still carry `time` as an
+# input (X and P score as high or higher). So the exclusion wasn't earning its keep against current
+# data and was reverted -- Viscosity's GP now takes the same active_dims as every other channel.
+#
+# The prior mean is still only an action-INDEPENDENT time-indexed baseline (the same kind P
+# previously had), not an action-dependent fix: a_0 (the real ODE's biomass term that actually
+# drives viscosity) is exposed by the simulator (PenSimPy's `bx.a0`) during real rollouts, but
+# get_mean(X) is also evaluated on imagined MC-PILCO particles at planning time, where X is only
+# (state, action) -- a_0 is never available there, so it cannot be turned into a genuine
+# action-dependent prior without extending the tracked state.
 RECIPE_MEAN_CHANNELS = {"Viscosity"}
 RECIPE_MEAN_GP_IDX = {STATE_NAMES.index(c) for c in RECIPE_MEAN_CHANNELS}
 
@@ -152,19 +150,6 @@ class Model_learning_RBF_det_time(ML.Model_learning_RBF):
     def get_gp(self, gp_index, init_dict):
         if gp_index == WT_GP_IDX:
             return RBF_WtMassBalance(**init_dict)
-        if gp_index == VISC_GP_IDX:
-            # New dict, not a mutation of `init_dict`: config_single_phase.py builds ONE
-            # init_dict_RBF and reuses the SAME object for every gp_index's list entry, so
-            # mutating it here would silently drop `time` from every other channel's GP too.
-            # Checked (and its active_dims fix applied) BEFORE the RECIPE_MEAN_GP_IDX branch below:
-            # RBF_RecipeMean(**init_dict) would otherwise use init_dict's default (all-6-dim)
-            # active_dims, silently undoing the drop-`time` fix for Viscosity.
-            visc_init_dict = dict(init_dict, active_dims=VISC_ACTIVE_DIMS,
-                                  lengthscales_init=np.delete(
-                                      np.asarray(init_dict["lengthscales_init"]), TIME_IDX))
-            if gp_index in RECIPE_MEAN_GP_IDX:
-                return RBF_RecipeMean(channel=STATE_NAMES[gp_index], **visc_init_dict)
-            return SGP.RBF(**visc_init_dict)
         if gp_index in RECIPE_MEAN_GP_IDX:
             return RBF_RecipeMean(channel=STATE_NAMES[gp_index], **init_dict)
         return super(Model_learning_RBF_det_time, self).get_gp(gp_index, init_dict)

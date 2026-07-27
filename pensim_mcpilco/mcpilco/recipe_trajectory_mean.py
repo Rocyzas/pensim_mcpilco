@@ -17,7 +17,7 @@ evaluations/Rollouts.ipynb). The one-step metric never sees the integration.
 as a prior mean, leaving the RBF to model only the residual. `Viscosity` cannot get the same treatment
 from first principles: its true ODE term needs `a_0`, an internal hyphal-growth sub-state that isn't
 part of this 5-channel state (and isn't recoverable at planning time even though the simulator exposes
-it during real rollouts -- see the VISC_GP_IDX comment in model_learning_det_time.py).
+it during real rollouts -- see the RECIPE_MEAN_CHANNELS comment in model_learning_det_time.py).
 
 So this module supplies an EMPIRICAL prior mean instead: the mean per-decision delta measured from
 pure-recipe (a = 0) batches, indexed by batch time. The decomposition mirrors the way the ACTION is
