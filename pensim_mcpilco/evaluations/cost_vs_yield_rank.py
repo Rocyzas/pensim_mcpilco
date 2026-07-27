@@ -24,7 +24,7 @@ for _p in (_ROOT, _OUTER):
 from mcpilco.pensim_wrapper import batch_yield_kg, WT_SOFT, WT_OVERFLOW, VISC_MAX
 from mcpilco.penicillin_cost import (PeniMassChangeCost, PeniConcentrationDenseCost, VISC_SOFT_START)
 
-SEED_DIR = Path(_ROOT) / "results" / "single_phase" / "seed3_33"
+SEED_DIR = Path(_ROOT) / "results" / "single_phase" / "seed3_104"
 LOG_PATH = SEED_DIR / "log.pkl"
 MONITOR_PATH = SEED_DIR / "monitor.pkl"
 NOTE_PATH = SEED_DIR / "note.txt"

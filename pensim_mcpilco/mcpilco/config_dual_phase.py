@@ -122,6 +122,7 @@ def get_config(seed=1, num_trials=10, fast=False, dtype=torch.float64, device=to
         "f_control_policy": Policy.Sum_of_gaussians,
         "control_policy_par": control_policy_par,
         "f_cost_function": PeniMassChangeCost,
+        # "f_cost_function": PeniConcentrationDenseCost,
         "cost_function_par": {"p_weight": 0.05, "soft_penalty": 0.05, "rate_penalty": 0.02,
                               "risk_weight": risk_weight, "visc_penalty": visc_penalty,
                               "harvest_reward": harvest_reward,

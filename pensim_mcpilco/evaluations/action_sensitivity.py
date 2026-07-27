@@ -1,9 +1,15 @@
+"""
+PYTHONPATH=.. python evaluations/action_sensitivity.py seed3_104
+
+Takes only a run id (resolved under results/single_phase/, or a full/relative path) --
+seed/num_trials/fast and the trained GPs are read back from that run's own
+note.txt/log.pkl via eval_single_phase_lib.load_run/reconstruct_gp_agent.
+"""
 import os
 os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
 
+import argparse
 import csv
-import pickle
-from pathlib import Path
 
 import numpy as np
 import torch
@@ -12,13 +18,14 @@ from scipy import stats
 
 import os as _os, sys as _sys
 _ROOT = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
-_sys.path.insert(0, _ROOT)
-_sys.path.insert(0, _os.path.dirname(_ROOT))
-_sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+if _ROOT not in _sys.path:
+    _sys.path.insert(0, _ROOT)
+if _os.path.dirname(_ROOT) not in _sys.path:
+    _sys.path.insert(0, _os.path.dirname(_ROOT))
 
-from pensim_mcpilco.evaluations.diagnose_gp import reconstruct, _resolve_trial
+import evaluations.eval_single_phase_lib as lib
 from mcpilco.pensim_wrapper import (PenSimWrapper, STATE_NAMES, STATE_DIM, ACTION_DIM,
-                                    T_SAMPLING, CONTROL_H)
+                                    CONTROL_H, T_SAMPLING)
 
 CHANNELS = [c for c in STATE_NAMES if c != "time"]
 CHANNEL_IDX = [STATE_NAMES.index(c) for c in CHANNELS]
@@ -28,16 +35,14 @@ PHASE_COLORS = {"early": "C0", "mid": "C1", "late": "C2"}
 LARGE_ACTION_LENGTHSCALE = 2.0
 
 
-def load_agent(results_dir, seed, num_trials, fast, trial):
-    base = Path(results_dir)
-    if not base.is_absolute():
-        base = Path(_ROOT) / base
-    log_file = base / "log.pkl"
-    log = pickle.load(open(log_file, "rb"))
-    idx = _resolve_trial(log, trial)
-    agent = reconstruct(seed, num_trials, fast, log, idx)
-    print(f"[load_agent] {results_dir} trial {idx}")
-    return agent
+def load_agent(run_id, trial):
+    """Resolves run_id under results/single_phase/ (or as a full/relative path), reads
+    seed/num_trials/fast back from that run's own note.txt, and reconstructs the trained GP
+    model from log.pkl -- no more separately hand-typing SEED/NUM_TRIALS/FAST."""
+    run = lib.load_run(run_id)
+    agent, idx = lib.reconstruct_gp_agent(run, idx=trial)
+    print(f"[load_agent] {run.dir} trial {idx}")
+    return agent, run, idx
 
 
 def lengthscale_report(agent):
@@ -385,20 +390,15 @@ def plot_first_sign_loss(loss_rows, horizons, out_path, title_suffix=""):
     print(f"saved {out_path}")
 
 
-if __name__ == "__main__":
-    RESULTS_DIR = "results/single_phase/seed3_33"
-    SEED = 3
-    NUM_TRIALS = 5
-    FAST = False
-    TRIAL = None
+def main(run_id, trial=None):
     SIM_SEED = 424242
     J_GRID = [2, 8, 15, 22, 30, 38, 44]
     DELTAS = [-1.0, -0.5, -0.2, 0.2, 0.5, 1.0]
     HORIZONS = [1, 5, 10, 20]
     OFFMANIFOLD_LEVEL = 0.6
 
-    out_dir = Path(_ROOT) / RESULTS_DIR
-    agent = load_agent(RESULTS_DIR, SEED, NUM_TRIALS, FAST, TRIAL)
+    agent, run, _idx = load_agent(run_id, trial)
+    out_dir = run.dir
 
     ml = agent.model_learning
     X = ml.gp_inputs          # [N, STATE_DIM + ACTION_DIM], shared across all GPs
@@ -465,3 +465,14 @@ if __name__ == "__main__":
              ["phase", "channel", "agree", "total", "fraction"])
     plot_sensitivity(om_rows, out_dir / "action_sensitivity_offmanifold_scatter.png",
                      title_suffix=f" (off-manifold, a={OFFMANIFOLD_LEVEL} baseline)")
+
+
+if __name__ == "__main__":
+    p = argparse.ArgumentParser()
+    p.add_argument("run_id", type=str,
+                   help="run to evaluate, e.g. 'seed3_104' (resolved under results/single_phase/) "
+                        "or a full/relative path to a run folder")
+    p.add_argument("--trial", type=int, default=None,
+                   help="which trial's GP model to diagnose (default: last saved)")
+    args = p.parse_args()
+    main(run_id=args.run_id, trial=args.trial)

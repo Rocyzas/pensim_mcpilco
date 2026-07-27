@@ -1,0 +1,617 @@
+"""
+PYTHONPATH=.. python "evaluations/action_sensitivity_multi-phase.py" seed3_1
+
+(Direct file execution, not `-m` -- the hyphen in this filename isn't a valid Python module
+identifier, so it can't be imported or run as `-m evaluations.action_sensitivity_multi-phase`.)
+
+Takes only a run id (resolved under results/dual_phase/, or a full/relative path) --
+seed/num_trials/fast/pivot_hours and the trained GPs are read back from that run's own
+note.txt/log.pkl via eval_multi_phase_lib.load_run/reconstruct_gp_agent.
+
+Dual-phase counterpart to evaluations/action_sensitivity.py: same four tests (GP lengthscale
+report, action-deafness sweep, signal/noise ratio, true-vs-model one-step and sustained-feed
+action sensitivity), adapted for DualPhaseModelLearning (mcpilco/model_learning_dual_phase.py).
+The original does NOT work unmodified against a dual-phase run -- three real problems, not just
+renames:
+
+1. `agent.model_learning` is a composite of two Model_learning_RBF_det_time (`.phase1`/
+   `.phase2`), each with STATE_DIM GPs. The original's `reconstruct()` (from diagnose_gp.py)
+   assigns `ml.gp_inputs = ...` etc. directly, but DualPhaseModelLearning exposes those only as
+   READ-ONLY concatenated properties -> AttributeError. Uses
+   evaluations.eval_multi_phase_lib.reconstruct_gp_agent() instead, which assigns into
+   `.phase1`/`.phase2` directly (see that module for why).
+2. The original's `for k in range(ml.num_gp): ... STATE_NAMES[k]` loops assume 5 GPs; the
+   composite has 10 (phase1's 5 channels, then phase2's). STATE_NAMES[k] for k=5..9 is an
+   IndexError. Every such loop here is phase-aware: gp index k -> (phase, channel) via
+   `gp_phase_channel(k)`.
+3. Every `ml.get_next_state(...)` call needs to either go through the actual deployed
+   composite (with `reset_step_counter(j)` set to the decision index being probed -- see
+   `model_action_effect`/`model_rollout`) or bypass it entirely by calling `ml.phase1`/
+   `ml.phase2` directly when the question is about ONE phase's own GP in isolation
+   (`action_deafness_report`) -- mixing these up either desyncs the phase router from the
+   decision index actually being tested, or (for `action_deafness_report`) averages two
+   different batch-time state distributions into one meaningless "reference state".
+
+New here (not in the single-phase script): `model_phase(j, pivot_step)` labels which phase's
+GP the DEPLOYED model would actually use to answer a probe at decision `j`, alongside the
+original's early/mid/late `batch_phase` bucketing (a different, coarser partition -- kept
+because the pivot need not land on a batch third). `J_GRID` is densified around the pivot so
+the boundary itself gets probed, and one new plot (`plot_model_phase_summary`) breaks sign
+agreement down by phase1 vs phase2 -- the question this script exists to answer for a dual-phase
+run that action_sensitivity.py structurally cannot ask.
+"""
+import os
+os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
+
+import argparse
+import csv
+
+import numpy as np
+import torch
+import matplotlib.pyplot as plt
+from scipy import stats
+
+import os as _os, sys as _sys
+_ROOT = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+if _ROOT not in _sys.path:
+    _sys.path.insert(0, _ROOT)
+if _os.path.dirname(_ROOT) not in _sys.path:
+    _sys.path.insert(0, _os.path.dirname(_ROOT))
+
+import evaluations.eval_multi_phase_lib as lib
+from mcpilco.pensim_wrapper import (PenSimWrapper, STATE_NAMES, STATE_DIM, ACTION_DIM,
+                                    CONTROL_H, T_SAMPLING)
+
+CHANNELS = [c for c in STATE_NAMES if c != "time"]
+CHANNEL_IDX = [STATE_NAMES.index(c) for c in CHANNELS]
+INPUT_NAMES = STATE_NAMES + ["action"]
+SIGN_EPS = 1e-4
+PHASE_COLORS = {"early": "C0", "mid": "C1", "late": "C2"}
+PHASE_LABELS = ["phase1", "phase2"]
+LARGE_ACTION_LENGTHSCALE = 2.0
+
+
+def gp_phase_channel(k, state_dim=STATE_DIM):
+    """Composite GP index k (0..2*STATE_DIM-1) -> (phase label, channel name). gp_list is
+    ordered [phase1 x STATE_DIM, phase2 x STATE_DIM] -- see DualPhaseModelLearning.gp_list."""
+    phase_idx, ch_idx = divmod(k, state_dim)
+    return PHASE_LABELS[phase_idx], STATE_NAMES[ch_idx]
+
+
+def pivot_step_of(run):
+    """Decision index at which this run's DualPhaseModelLearning switches phases, read from
+    the run's OWN pivot_hours (note.txt) rather than assuming the module default -- a run may
+    have used a non-default --pivot_hours."""
+    return int(round(run.pivot_hours / T_SAMPLING))
+
+
+def model_phase(j, pivot_step):
+    """Which phase's GP the DEPLOYED composite actually uses to answer a probe launched at
+    decision j (see DualPhaseModelLearning.get_next_state's routing rule)."""
+    return "phase1" if j < pivot_step else "phase2"
+
+
+def load_agent(run_id, trial):
+    run = lib.load_run(run_id)
+    agent, idx = lib.reconstruct_gp_agent(run, idx=trial)
+    print(f"[load_agent] {run.dir} trial {idx}  pivot_hours={run.pivot_hours:g}")
+    return agent, run, idx
+
+
+def lengthscale_report(agent):
+    """Per-GP lengthscales, named by looking up each GP's OWN `active_dims` (the Viscosity GP
+    drops `time`, same as single-phase -- see model_learning_det_time.VISC_ACTIVE_DIMS) AND by
+    which phase it belongs to (gp index k -> (phase, channel) via gp_phase_channel)."""
+    ml = agent.model_learning
+    rows = []
+    for k in range(ml.num_gp):
+        phase, channel = gp_phase_channel(k)
+        gp = ml.gp_list[k]
+        if gp.flg_ARD:
+            ls = torch.exp(gp.log_lengthscales_par)
+        else:
+            ls = torch.exp(gp.log_lengthscales_par) * torch.ones(
+                gp.num_features, dtype=gp.dtype, device=gp.device)
+        ls = ls.detach().cpu().numpy()
+        active = gp.active_dims.detach().cpu().numpy()
+        names = [INPUT_NAMES[i] for i in active]
+        ls_by_name = dict(zip(names, ls))
+        a_val = ls_by_name["action"]
+        large = a_val >= LARGE_ACTION_LENGTHSCALE
+        flag = " <-- ACTION LENGTHSCALE LARGE (kernel may be ignoring the action)" if large else ""
+        vals = " ".join(f"{n}={v:.3f}" for n, v in zip(names, ls))
+        dropped = [n for n in INPUT_NAMES if n not in ls_by_name]
+        drop_note = f"  (no {', '.join(dropped)} input)" if dropped else ""
+        print(f"[lengthscales] {phase}:{channel:>10}: {vals}{flag}{drop_note}")
+        row = {"phase": phase, "gp": channel}
+        row.update({f"ls_{n}": ls_by_name.get(n, float("nan")) for n in INPUT_NAMES})
+        row["action_lengthscale"] = a_val
+        row["action_ls_large"] = large
+        rows.append(row)
+    return rows
+
+
+def action_deafness_report(agent, n_sweep=21):
+    """Per-phase: sweep the action at THAT phase's own mean training state (NOT a state
+    averaged across both phases -- they cover different batch-time distributions), calling
+    `sub.get_next_state` directly on phase1/phase2 (bypassing the composite's step counter
+    entirely, since we already know exactly which phase we mean to probe)."""
+    ml = agent.model_learning
+    a_grid = torch.linspace(-1.0, 1.0, n_sweep, dtype=ml.dtype, device=ml.device)
+    rows = []
+    with torch.no_grad():
+        for phase, sub in [("phase1", ml.phase1), ("phase2", ml.phase2)]:
+            ref_state = sub.gp_inputs[:, :STATE_DIM].mean(dim=0, keepdim=True)
+            for k in range(sub.num_gp):
+                gp = sub.gp_list[k]
+                deltas = []
+                for a in a_grid:
+                    u = torch.full((1, ACTION_DIM), float(a), dtype=sub.dtype, device=sub.device)
+                    ns, _, _ = sub.get_next_state(current_state=ref_state, current_input=u,
+                                                  particle_pred=False)
+                    deltas.append(float((ns - ref_state)[0, k]))
+                deltas = np.array(deltas)
+                spread = float(deltas.max() - deltas.min())
+                sigma_n = float(torch.sqrt(gp.get_sigma_n_2()).detach().cpu())
+                deaf = spread < sigma_n
+                flag = " <-- DEAF (spread < sigma_n)" if deaf else ""
+                channel = STATE_NAMES[k]
+                print(f"[action-sweep] {phase}:{channel:>10}: spread={spread:.5f} sigma_n={sigma_n:.5f}{flag}")
+                rows.append({"phase": phase, "gp": channel, "spread": spread, "sigma_n": sigma_n,
+                            "deaf": deaf})
+    return rows
+
+
+def signal_noise_report(agent):
+    ml = agent.model_learning
+    rows = []
+    for k in range(ml.num_gp):
+        phase, channel = gp_phase_channel(k)
+        gp = ml.gp_list[k]
+        signal_sd = float(torch.sqrt(torch.exp(gp.log_lambda_par)).detach().cpu())
+        noise_sd = float(torch.sqrt(gp.get_sigma_n_2()).detach().cpu())
+        ratio = signal_sd / noise_sd if noise_sd else float("inf")
+        print(f"[signal-noise] {phase}:{channel:>10}: signal_sd={signal_sd:.5f} "
+              f"noise_sd={noise_sd:.5f} ratio={ratio:.2f}")
+        rows.append({"phase": phase, "gp": channel, "signal_sd": signal_sd, "noise_sd": noise_sd,
+                     "ratio": ratio})
+    return rows
+
+
+def true_action_effect(seed, j, delta, base_level=0.0):
+    """Pure real-simulator comparison -- unaffected by dual-phase (the physics don't know or
+    care how the LEARNED model is structured), unchanged from action_sensitivity.py."""
+    base = PenSimWrapper(seed_offset=0)
+    pert = PenSimWrapper(seed_offset=0)
+    base_policy = lambda state, decision_idx: np.array([base_level])
+    pert_policy = lambda state, decision_idx: np.array(
+        [base_level + delta if decision_idx >= j else base_level])
+    s_base, _, _ = base.rollout(s0=None, policy=base_policy, T=CONTROL_H, dt=T_SAMPLING,
+                                noise=None, seed=seed)
+    s_pert, _, _ = pert.rollout(s0=None, policy=pert_policy, T=CONTROL_H, dt=T_SAMPLING,
+                                noise=None, seed=seed)
+    true_delta = s_pert[j + 1] - s_base[j + 1]
+    return s_base[j], true_delta, s_base, s_pert
+
+
+def model_action_effect(agent, state_j, delta, j, base_level=0.0):
+    """Queries the DEPLOYED composite at decision j -- reset_step_counter(j) before EACH
+    one-off call (baseline and perturbed are independent queries at the same j, not a
+    sequential pair) so the phase router answers with whichever phase real rollouts would
+    actually use at that decision."""
+    ml = agent.model_learning
+    s = torch.tensor(state_j, dtype=ml.dtype, device=ml.device).unsqueeze(0)
+    u0 = torch.full((1, ACTION_DIM), float(base_level), dtype=ml.dtype, device=ml.device)
+    ud = torch.full((1, ACTION_DIM), float(base_level + delta), dtype=ml.dtype, device=ml.device)
+    with torch.no_grad():
+        ml.reset_step_counter(j)
+        ns0, _, _ = ml.get_next_state(current_state=s, current_input=u0, particle_pred=False)
+        ml.reset_step_counter(j)
+        nsd, _, _ = ml.get_next_state(current_state=s, current_input=ud, particle_pred=False)
+    return (nsd - ns0)[0].detach().cpu().numpy()
+
+
+def model_rollout(agent, state_j, action_level, n_steps, j):
+    """Sequential walk starting at decision j -- reset_step_counter(j) ONCE before the loop;
+    the composite's own auto-increment then correctly crosses the pivot mid-rollout if
+    j + n_steps does, exactly like a real deployment rollout would."""
+    ml = agent.model_learning
+    s = torch.tensor(state_j, dtype=ml.dtype, device=ml.device).unsqueeze(0)
+    u = torch.full((1, ACTION_DIM), float(action_level), dtype=ml.dtype, device=ml.device)
+    traj = [s]
+    ml.reset_step_counter(j)
+    with torch.no_grad():
+        for _ in range(n_steps):
+            s, _, _ = ml.get_next_state(current_state=s, current_input=u, particle_pred=False)
+            traj.append(s)
+    return torch.cat(traj, dim=0).detach().cpu().numpy()
+
+
+def phase_of(j, n_decisions):
+    """Coarse early/mid/late batch-thirds bucketing -- kept alongside model_phase() since the
+    two partitions differ (the pivot need not land on a batch third)."""
+    frac = j / max(1, n_decisions - 1)
+    if frac < 1.0 / 3.0:
+        return "early"
+    if frac < 2.0 / 3.0:
+        return "mid"
+    return "late"
+
+
+def signed(x):
+    return 0.0 if abs(x) < SIGN_EPS else float(np.sign(x))
+
+
+def sensitivity_table(agent, sim_seed, js, deltas, pivot_step, base_level=0.0):
+    n_decisions = int(CONTROL_H / T_SAMPLING)
+    header = (f"{'bphase':>6} {'mphase':>6} {'j':>4} {'delta':>6} {'chan':>10} "
+              f"{'true_d':>10} {'model_d':>10} {'sign':>6}")
+    print(f"base_level={base_level}")
+    print(header)
+
+    rows = []
+    for j in js:
+        for delta in deltas:
+            state_j, true_delta, _, _ = true_action_effect(sim_seed, j, delta, base_level)
+            model_delta = model_action_effect(agent, state_j, delta, j, base_level)
+            bphase = phase_of(j, n_decisions)
+            mphase = model_phase(j, pivot_step)
+            for c, idx in zip(CHANNELS, CHANNEL_IDX):
+                td, md = float(true_delta[idx]), float(model_delta[idx])
+                match = signed(td) == signed(md)
+                rows.append({"batch_phase": bphase, "model_phase": mphase, "j": j, "delta": delta,
+                             "channel": c, "true_delta": td, "model_delta": md,
+                             "sign_match": match, "base_level": base_level})
+                print(f"{bphase:>6} {mphase:>6} {j:>4d} {delta:>6.2f} {c:>10} {td:>10.5f} {md:>10.5f} "
+                      f"{'OK' if match else 'X':>6}")
+
+    agree = sum(r["sign_match"] for r in rows)
+    total = len(rows)
+    phase_channel_stats = {}
+    model_phase_channel_stats = {}
+    for r in rows:
+        key = (r["batch_phase"], r["channel"])
+        a, t = phase_channel_stats.get(key, (0, 0))
+        phase_channel_stats[key] = (a + int(r["sign_match"]), t + 1)
+        mkey = (r["model_phase"], r["channel"])
+        a2, t2 = model_phase_channel_stats.get(mkey, (0, 0))
+        model_phase_channel_stats[mkey] = (a2 + int(r["sign_match"]), t2 + 1)
+
+    print()
+    print(f"{'bphase':>6} {'chan':>10} {'sign agreement':>15}")
+    for (phase, c), (a, t) in sorted(phase_channel_stats.items()):
+        print(f"{phase:>6} {c:>10} {a}/{t} = {a / t:.2f}")
+
+    print()
+    print(f"{'mphase':>6} {'chan':>10} {'sign agreement':>15}   <- dual-phase model routing")
+    for (phase, c), (a, t) in sorted(model_phase_channel_stats.items()):
+        print(f"{phase:>6} {c:>10} {a}/{t} = {a / t:.2f}")
+
+    print()
+    print(f"HEADLINE sign agreement: {agree}/{total} = {agree / total:.3f}")
+    return rows, phase_channel_stats, model_phase_channel_stats, agree, total
+
+
+def sustained_divergence_table(agent, sim_seed, js, deltas, horizons, pivot_step, base_level=0.0):
+    horizons = sorted(horizons)
+    max_h = max(horizons)
+    header = (f"{'mphase':>6} {'j':>4} {'delta':>6} {'k':>4} {'chan':>10} {'true_d':>10} "
+              f"{'model_d':>10} {'abs_err':>9} {'sign':>6}")
+    print(f"base_level={base_level}")
+    print(header)
+
+    rows = []
+    first_loss = {}
+    for j in js:
+        mphase = model_phase(j, pivot_step)
+        for delta in deltas:
+            state_j, _, s_base, s_pert = true_action_effect(sim_seed, j, delta, base_level)
+            model_base_traj = model_rollout(agent, state_j, base_level, max_h, j)
+            model_pert_traj = model_rollout(agent, state_j, base_level + delta, max_h, j)
+            for k in horizons:
+                if j + k >= s_base.shape[0]:
+                    continue
+                for c, idx in zip(CHANNELS, CHANNEL_IDX):
+                    td = float(s_pert[j + k, idx] - s_base[j + k, idx])
+                    md = float(model_pert_traj[k, idx] - model_base_traj[k, idx])
+                    err = abs(md - td)
+                    match = signed(td) == signed(md)
+                    rows.append({"model_phase": mphase, "j": j, "delta": delta, "k": k, "channel": c,
+                                 "true_delta": td, "model_delta": md, "abs_error": err,
+                                 "sign_match": match})
+                    print(f"{mphase:>6} {j:>4d} {delta:>6.2f} {k:>4d} {c:>10} {td:>10.5f} {md:>10.5f} "
+                          f"{err:>9.5f} {'OK' if match else 'X':>6}")
+                    key = (j, delta, c)
+                    if not match and key not in first_loss:
+                        first_loss[key] = k
+
+    loss_rows = []
+    for j in js:
+        mphase = model_phase(j, pivot_step)
+        for delta in deltas:
+            for c in CHANNELS:
+                k_loss = first_loss.get((j, delta, c), -1)
+                loss_rows.append({"model_phase": mphase, "j": j, "delta": delta, "channel": c,
+                                  "first_sign_loss_k": k_loss})
+
+    print()
+    never = sum(1 for r in loss_rows if r["first_sign_loss_k"] == -1)
+    print(f"sign held through k={max_h} in {never}/{len(loss_rows)} (j, delta, channel) combos")
+    return rows, loss_rows
+
+
+def save_csv(rows, path, fieldnames):
+    with open(path, "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=fieldnames)
+        w.writeheader()
+        for r in rows:
+            w.writerow(r)
+    print(f"saved {path}")
+
+
+def plot_gp_diagnostics(ls_rows, deaf_rows, sn_rows, out_path):
+    fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(19, 6.5))
+
+    labels = [f"{r['phase']}:{r['gp']}" for r in ls_rows]
+    mat = np.array([[r[f"ls_{n}"] for n in INPUT_NAMES] for r in ls_rows])
+    im = ax1.imshow(mat, cmap="viridis", aspect="auto")
+    ax1.set_xticks(range(len(INPUT_NAMES)))
+    ax1.set_xticklabels(INPUT_NAMES, rotation=45, ha="right")
+    ax1.set_yticks(range(len(ls_rows)))
+    ax1.set_yticklabels(labels, fontsize=8)
+    ax1.axhline(STATE_DIM - 0.5, color="white", lw=2)
+    vmax = np.nanmax(mat) if np.nanmax(mat) > 0 else 1.0
+    for i in range(mat.shape[0]):
+        for j in range(mat.shape[1]):
+            ax1.text(j, i, f"{mat[i, j]:.2f}", ha="center", va="center",
+                     color="white" if mat[i, j] < vmax * 0.6 else "black", fontsize=7)
+    ax1.set_title(f"decoded lengthscales per (phase, GP)\n(action col flagged large above {LARGE_ACTION_LENGTHSCALE})")
+    fig.colorbar(im, ax=ax1)
+
+    labels_d = [f"{r['phase']}:{r['gp']}" for r in deaf_rows]
+    x = np.arange(len(deaf_rows))
+    width = 0.35
+    spreads = [r["spread"] for r in deaf_rows]
+    sigmas = [r["sigma_n"] for r in deaf_rows]
+    colors = ["crimson" if r["deaf"] else "C0" for r in deaf_rows]
+    ax2.bar(x - width / 2, spreads, width, color=colors, label="action-sweep spread")
+    ax2.bar(x + width / 2, sigmas, width, color="0.6", label="sigma_n")
+    ax2.axvline(STATE_DIM - 0.5, color="k", ls=":", lw=1)
+    ax2.set_xticks(x)
+    ax2.set_xticklabels(labels_d, rotation=45, ha="right", fontsize=8)
+    ax2.set_title("action-sweep spread vs noise floor (red = deaf)")
+    ax2.legend(fontsize=8)
+    ax2.grid(alpha=0.3, axis="y")
+
+    labels_s = [f"{r['phase']}:{r['gp']}" for r in sn_rows]
+    x3 = np.arange(len(sn_rows))
+    signal_sds = [r["signal_sd"] for r in sn_rows]
+    noise_sds = [r["noise_sd"] for r in sn_rows]
+    ax3.bar(x3 - width / 2, signal_sds, width, color="C0", label="signal sd (sqrt lambda)")
+    ax3.bar(x3 + width / 2, noise_sds, width, color="C3", label="noise sd (sigma_n)")
+    ax3.axvline(STATE_DIM - 0.5, color="k", ls=":", lw=1)
+    ax3.set_yscale("log")
+    ax3.set_xticks(x3)
+    ax3.set_xticklabels(labels_s, rotation=45, ha="right", fontsize=8)
+    ax3.set_title("signal vs noise per channel\nnoise near signal = channel not being explained")
+    ax3.legend(fontsize=8)
+    ax3.grid(alpha=0.3, axis="y", which="both")
+
+    fig.tight_layout()
+    fig.savefig(out_path)
+    print(f"saved {out_path}")
+
+
+def plot_sensitivity(rows, out_path, title_suffix=""):
+    fig, axes = plt.subplots(2, 2, figsize=(11, 9))
+    for ax, c in zip(axes.ravel(), CHANNELS):
+        crows = [r for r in rows if r["channel"] == c]
+        td = np.array([r["true_delta"] for r in crows])
+        md = np.array([r["model_delta"] for r in crows])
+        for ph, col in PHASE_COLORS.items():
+            m = np.array([r["batch_phase"] == ph for r in crows])
+            ax.scatter(td[m], md[m], color=col, label=ph, alpha=0.8, zorder=3)
+        lim = [min(td.min(), md.min()), max(td.max(), md.max())]
+        ax.plot(lim, lim, "k--", lw=1, label="y=x", zorder=2)
+        ax.axhline(0, color="0.7", lw=0.8, zorder=1)
+        ax.axvline(0, color="0.7", lw=0.8, zorder=1)
+        agree = sum(r["sign_match"] for r in crows)
+        rho, p_value = stats.spearmanr(td, md) if len(td) > 1 else (float("nan"), float("nan"))
+        ax.set_title(f"{c}: sign agree {agree}/{len(crows)}, rho={rho:+.2f} (p={p_value:.3f})")
+        ax.set_xlabel("true delta")
+        ax.set_ylabel("model delta")
+        ax.grid(alpha=0.3)
+    axes.ravel()[0].legend(fontsize=8)
+    fig.suptitle(f"true vs model one-step action sensitivity{title_suffix}")
+    fig.tight_layout()
+    fig.savefig(out_path)
+    print(f"saved {out_path}")
+
+
+def plot_model_phase_summary(model_phase_channel_stats, out_path, title_suffix=""):
+    """The question action_sensitivity.py structurally cannot ask: does true-vs-model sign
+    agreement differ between phase1 and phase2 -- i.e. does accuracy change at the pivot?"""
+    fig, ax = plt.subplots(figsize=(9, 5))
+    x = np.arange(len(CHANNELS))
+    width = 0.35
+    for i, ph in enumerate(PHASE_LABELS):
+        vals = []
+        for c in CHANNELS:
+            a, t = model_phase_channel_stats.get((ph, c), (0, 0))
+            vals.append(a / t if t else float("nan"))
+        ax.bar(x + (i - 0.5) * width, vals, width, label=ph)
+    ax.set_xticks(x); ax.set_xticklabels(CHANNELS)
+    ax.set_ylim(0, 1.05)
+    ax.set_ylabel("sign agreement (true vs model)")
+    ax.set_title(f"Sign agreement by dual-phase model routing{title_suffix}")
+    ax.legend(fontsize=8)
+    ax.grid(alpha=0.3, axis="y")
+    fig.tight_layout()
+    fig.savefig(out_path)
+    print(f"saved {out_path}")
+
+
+def plot_multistep_divergence(rows, horizons, out_path, title_suffix=""):
+    fig, axes = plt.subplots(2, 2, figsize=(11, 9))
+    deltas_all = sorted({r["delta"] for r in rows})
+    norm = plt.Normalize(vmin=min(deltas_all), vmax=max(deltas_all))
+    cmap = plt.cm.coolwarm
+    for ax, c in zip(axes.ravel(), CHANNELS):
+        for j in sorted({r["j"] for r in rows}):
+            for delta in deltas_all:
+                crows = sorted(
+                    [r for r in rows if r["channel"] == c and r["j"] == j and r["delta"] == delta],
+                    key=lambda r: r["k"])
+                if not crows:
+                    continue
+                ks = [r["k"] for r in crows]
+                td = [r["true_delta"] for r in crows]
+                md = [r["model_delta"] for r in crows]
+                color = cmap(norm(delta))
+                ax.plot(ks, td, "-o", color=color, alpha=0.5, ms=3, lw=1)
+                ax.plot(ks, md, "--x", color=color, alpha=0.5, ms=4, lw=1)
+        ax.axhline(0, color="0.7", lw=0.8)
+        ax.set_title(f"{c} (solid=true, dashed=model)")
+        ax.set_xlabel("horizon k (decisions ahead)")
+        ax.set_ylabel("cumulative delta (normalised)")
+        ax.set_xticks(horizons)
+        ax.grid(alpha=0.3)
+    sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
+    sm.set_array([])
+    fig.colorbar(sm, ax=axes.ravel().tolist(), label="delta", shrink=0.8)
+    fig.suptitle(f"multi-step sustained-feed divergence: true vs model{title_suffix}")
+    fig.savefig(out_path)
+    print(f"saved {out_path}")
+
+
+def plot_first_sign_loss(loss_rows, horizons, out_path, title_suffix=""):
+    fig, ax = plt.subplots(figsize=(8, 5))
+    x = np.arange(len(CHANNELS))
+    bins = horizons + [-1]
+    n_bins = len(bins)
+    width = 0.8 / n_bins
+    for i, k in enumerate(bins):
+        counts = [sum(1 for r in loss_rows if r["channel"] == c and r["first_sign_loss_k"] == k)
+                 for c in CHANNELS]
+        label = "never lost" if k == -1 else f"lost by k={k}"
+        color = "0.3" if k == -1 else None
+        ax.bar(x + (i - (n_bins - 1) / 2) * width, counts, width, label=label, color=color)
+    ax.set_xticks(x)
+    ax.set_xticklabels(CHANNELS)
+    ax.set_ylabel("count of (j, delta) combos")
+    ax.set_title(f"first horizon at which the GP loses the true sign{title_suffix}")
+    ax.legend(fontsize=8)
+    ax.grid(alpha=0.3, axis="y")
+    fig.tight_layout()
+    fig.savefig(out_path)
+    print(f"saved {out_path}")
+
+
+def main(run_id, trial=None):
+    SIM_SEED = 424242
+    PIVOT_MARGIN = 1                 # extra J_GRID points on each side of the pivot -- each
+                                     # extra J value costs 2 real PenSimPy ODE rollouts x
+                                     # len(DELTAS), so keep this small
+    DELTAS = [-1.0, -0.5, -0.2, 0.2, 0.5, 1.0]
+    HORIZONS = [1, 5, 10, 20]
+    OFFMANIFOLD_LEVEL = 0.6
+
+    agent, run, _idx = load_agent(run_id, trial)
+    pivot_step = pivot_step_of(run)
+    out_dir = run.dir
+    print(f"pivot_step={pivot_step} (pivot_hours={run.pivot_hours:g})")
+
+    # Original script's early/mid/late spread, densified around the phase pivot so the
+    # boundary itself gets probed rather than only inferred between two far-apart points.
+    J_GRID = sorted(set([2, 8, 15, 22, 30, 38, 44] +
+                        list(range(max(0, pivot_step - PIVOT_MARGIN), pivot_step + PIVOT_MARGIN + 1))))
+
+    ml = agent.model_learning
+    for phase, sub in [("phase1", ml.phase1), ("phase2", ml.phase2)]:
+        X = sub.gp_inputs
+        print(f"\n--- {phase} GP training input stats ---")
+        for name, m, s in zip(INPUT_NAMES, X.mean(dim=0).tolist(), X.std(dim=0).tolist()):
+            print(f"{name:>10}: mean={m:8.4f}  std={s:8.4f}")
+
+    print("\n--- lengthscale report ---")
+    ls_rows = lengthscale_report(agent)
+    save_csv(ls_rows, out_dir / "action_sensitivity_lengthscales.csv",
+             ["phase", "gp"] + [f"ls_{n}" for n in INPUT_NAMES] + ["action_lengthscale", "action_ls_large"])
+
+    print("\n--- action-deafness report ---")
+    deaf_rows = action_deafness_report(agent)
+    save_csv(deaf_rows, out_dir / "action_sensitivity_deafness.csv",
+             ["phase", "gp", "spread", "sigma_n", "deaf"])
+
+    print("\n--- signal vs noise report ---")
+    sn_rows = signal_noise_report(agent)
+    save_csv(sn_rows, out_dir / "action_sensitivity_signal_noise.csv",
+             ["phase", "gp", "signal_sd", "noise_sd", "ratio"])
+
+    print("\n--- true vs model action sensitivity (on-manifold, a=0 baseline) ---")
+    rows, phase_channel_stats, model_phase_channel_stats, agree, total = sensitivity_table(
+        agent, SIM_SEED, J_GRID, DELTAS, pivot_step)
+    save_csv(rows, out_dir / "action_sensitivity_table.csv",
+             ["batch_phase", "model_phase", "j", "delta", "channel", "true_delta", "model_delta",
+              "sign_match", "base_level"])
+
+    summary_rows = []
+    for (phase, c), (a, t) in sorted(phase_channel_stats.items()):
+        summary_rows.append({"grouping": "batch_phase", "phase": phase, "channel": c,
+                             "agree": a, "total": t, "fraction": a / t})
+    for (phase, c), (a, t) in sorted(model_phase_channel_stats.items()):
+        summary_rows.append({"grouping": "model_phase", "phase": phase, "channel": c,
+                             "agree": a, "total": t, "fraction": a / t})
+    summary_rows.append({"grouping": "ALL", "phase": "ALL", "channel": "ALL", "agree": agree,
+                         "total": total, "fraction": agree / total})
+    save_csv(summary_rows, out_dir / "action_sensitivity_summary.csv",
+             ["grouping", "phase", "channel", "agree", "total", "fraction"])
+
+    plot_gp_diagnostics(ls_rows, deaf_rows, sn_rows, out_dir / "action_sensitivity_gp_diagnostics.png")
+    plot_sensitivity(rows, out_dir / "action_sensitivity_scatter.png")
+    plot_model_phase_summary(model_phase_channel_stats,
+                             out_dir / "action_sensitivity_model_phase_summary.png")
+
+    print("\n--- multi-step sustained-feed divergence (on-manifold, a=0 baseline) ---")
+    ms_rows, ms_loss_rows = sustained_divergence_table(agent, SIM_SEED, J_GRID, DELTAS, HORIZONS, pivot_step)
+    save_csv(ms_rows, out_dir / "action_sensitivity_multistep.csv",
+             ["model_phase", "j", "delta", "k", "channel", "true_delta", "model_delta", "abs_error", "sign_match"])
+    save_csv(ms_loss_rows, out_dir / "action_sensitivity_multistep_first_loss.csv",
+             ["model_phase", "j", "delta", "channel", "first_sign_loss_k"])
+    plot_multistep_divergence(ms_rows, HORIZONS, out_dir / "action_sensitivity_multistep.png")
+    plot_first_sign_loss(ms_loss_rows, HORIZONS, out_dir / "action_sensitivity_multistep_first_loss.png")
+
+    print(f"\n--- true vs model action sensitivity (off-manifold, a={OFFMANIFOLD_LEVEL} baseline) ---")
+    om_rows, om_phase_channel_stats, om_model_phase_channel_stats, om_agree, om_total = sensitivity_table(
+        agent, SIM_SEED, J_GRID, DELTAS, pivot_step, base_level=OFFMANIFOLD_LEVEL)
+    save_csv(om_rows, out_dir / "action_sensitivity_offmanifold_table.csv",
+             ["batch_phase", "model_phase", "j", "delta", "channel", "true_delta", "model_delta",
+              "sign_match", "base_level"])
+
+    om_summary_rows = []
+    for (phase, c), (a, t) in sorted(om_phase_channel_stats.items()):
+        om_summary_rows.append({"grouping": "batch_phase", "phase": phase, "channel": c,
+                                "agree": a, "total": t, "fraction": a / t})
+    for (phase, c), (a, t) in sorted(om_model_phase_channel_stats.items()):
+        om_summary_rows.append({"grouping": "model_phase", "phase": phase, "channel": c,
+                                "agree": a, "total": t, "fraction": a / t})
+    om_summary_rows.append({"grouping": "ALL", "phase": "ALL", "channel": "ALL", "agree": om_agree,
+                            "total": om_total, "fraction": om_agree / om_total})
+    save_csv(om_summary_rows, out_dir / "action_sensitivity_offmanifold_summary.csv",
+             ["grouping", "phase", "channel", "agree", "total", "fraction"])
+    plot_sensitivity(om_rows, out_dir / "action_sensitivity_offmanifold_scatter.png",
+                     title_suffix=f" (off-manifold, a={OFFMANIFOLD_LEVEL} baseline)")
+    plot_model_phase_summary(om_model_phase_channel_stats,
+                             out_dir / "action_sensitivity_offmanifold_model_phase_summary.png",
+                             title_suffix=f" (off-manifold, a={OFFMANIFOLD_LEVEL} baseline)")
+
+
+if __name__ == "__main__":
+    p = argparse.ArgumentParser()
+    p.add_argument("run_id", type=str,
+                   help="run to evaluate, e.g. 'seed3_1' (resolved under results/dual_phase/) "
+                        "or a full/relative path to a run folder")
+    p.add_argument("--trial", type=int, default=None,
+                   help="which trial's GP model to diagnose (default: last saved)")
+    args = p.parse_args()
+    main(run_id=args.run_id, trial=args.trial)

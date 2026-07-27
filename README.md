@@ -137,7 +137,18 @@ seed3_30 and 31 differs in cost function only. Both achieve above yield, both ro
 seed3_32/33 - same as above, but removed probes (seeing how does policy learn without them)
     preparing for potential AEPILCO implementation
     
+(due to cluster issue)
+Cost=Mass
+seed3_34 will be with Visc and P kernel fix with no probes (T=5)
+seed3_35 will be with Visc and P kernel fix with probes (T=5)
 
+Cost=Conc
+seed3_36 will be with Visc and P kernel fix with no probes (T=5)
+seed3_37 will be with Visc and P kernel fix with probes (T=5)
+
+
+seed3_103 = seed3_104 - MassFunc, T=2, no probs
+seed3_100 =           - PeniConc  T=2, no prbs, 
 
 PLAN
 - Train seed3_12, and observer result (only difference is probes). 
