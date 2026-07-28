@@ -158,6 +158,15 @@ seed3_3 and seed4_3 used 100 pivot
 seed3_4 and seed4_4 used blended pivot
 
 
+Can be compared (all states online, Mass func):
+Singlephase seed3_38 and multiphase seed3_5
+Singlephase seed4_10 and multiphase seed4_5
+
+Now making viscosity offline
+Singlephase seed3_39 and multiphase seed3_6
+
+
+
 seed3_103 = seed3_104 - MassFunc, T=2, no probs
 seed3_100 =           - PeniConc  T=2, no prbs, 
 
