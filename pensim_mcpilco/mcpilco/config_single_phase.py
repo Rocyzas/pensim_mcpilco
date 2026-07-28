@@ -30,7 +30,7 @@ from mcpilco.pensim_wrapper import (STATE_DIM,
 def get_config(seed=1, num_trials=10, fast=False, dtype=torch.float64, device=torch.device("cuda" if torch.cuda.is_available() else "cpu"),
                optim_horizon_steps=None, num_anchor_batches=0, num_anchors=12, anchor_var=0.01,
                risk_weight=0.0, visc_penalty=0.02, harvest_reward=True, constraint_strength=1.5,
-               num_high_feed_probes=0, high_feed_levels=(0.6, 0.8, 1.0)):
+               num_high_feed_probes=0, high_feed_levels=(0.6, 0.8, 1.0), pms_visc_delay=True):
     torch.manual_seed(seed)
     np.random.seed(seed)
 
@@ -196,7 +196,11 @@ def get_config(seed=1, num_trials=10, fast=False, dtype=torch.float64, device=to
         "policy_optimization_dict": policy_optimization_dict,
     }
 
-    wrapper_par = {"seed_offset": seed * 1000, "use_offline_measurements": True}
+    # An explicit parameter (not a bare literal) so it round-trips through note.txt/eval's
+    # config reconstruction (see eval_single_phase_lib.py's _GET_CONFIG_KEYS/_build_cfg_kwargs)
+    # instead of every reconstruction silently assuming today's default regardless of what a
+    # given saved run actually used.
+    wrapper_par = {"seed_offset": seed * 1000, "pms_visc_delay": pms_visc_delay}
 
     anchor_par = {"num_batches": num_anchor_batches, "num_anchors": num_anchors, "anchor_var": anchor_var}
 

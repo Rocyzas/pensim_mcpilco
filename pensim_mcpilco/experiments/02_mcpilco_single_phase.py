@@ -13,7 +13,7 @@ _sys.path.insert(0, _ROOT)
 _sys.path.insert(0, _os.path.dirname(_ROOT))
 
 from mcpilco.config_single_phase import get_config
-from mcpilco.pensim_wrapper import PenSimWrapper, PenSimMCPILCO
+from mcpilco.pensim_wrapper import PenSimWrapper, PenSimMCPILCODelayed
 
 _RESULTS_ROOT = Path(_ROOT) / "results" / "single_phase"
 
@@ -58,11 +58,15 @@ def main(seed=1, num_trials=10, fast=False, out_dir=None,
                   "num_anchors": num_anchors, "anchor_var": anchor_var,
                   "risk_weight": risk_weight, "visc_penalty": visc_penalty,
                   "constraint_strength": constraint_strength,
-                  "harvest_reward": harvest_reward, "num_high_feed_probes": num_high_feed_probes}
+                  "harvest_reward": harvest_reward, "num_high_feed_probes": num_high_feed_probes,
+                  # Read back from cfg (not re-hardcoded here) so note.txt can never drift from
+                  # what the wrapper actually used -- see eval_single_phase_lib.py's
+                  # _GET_CONFIG_KEYS/_build_cfg_kwargs, which reads this back at eval time.
+                  "pms_visc_delay": cfg["wrapper_par"]["pms_visc_delay"]}
     _write_note(log_path, run_params, cfg)
 
     wrapper = PenSimWrapper(**cfg["wrapper_par"])
-    agent = PenSimMCPILCO(pensim_wrapper=wrapper, **cfg["mc_pilco_init"])
+    agent = PenSimMCPILCODelayed(pensim_wrapper=wrapper, **cfg["mc_pilco_init"])
     # multi-origin short rollouts: build the fixed anchor set once, before training (no-op if disabled)
     if num_anchor_batches > 0:
         agent.setup_recipe_anchors(**cfg["anchor_par"])

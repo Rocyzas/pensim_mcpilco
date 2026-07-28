@@ -45,8 +45,15 @@ ACTION_DIM = 1
 # X, P, Viscosity are offline lab assays on the real plant (12h sampling + 4h analysis
 # delay -- see peni_env_setup.py's X_offline/P_offline/Viscosity_offline). Wt and time stay
 # online/undelayed. See _read_offline / _read's use_offline_measurements below.
-# DELAYED_OFFLINE_NAMES = {"X", "P", "Viscosity"}
-DELAYED_OFFLINE_NAMES = {"Viscosity"}
+#
+# Empty for now: Viscosity's delay is instead handled MC-PILCO4PMS-style (see
+# _ZOHPolicyProxy / PenSimMCPILCODelayed below) -- extract_state must keep returning the
+# TRUE Viscosity so the GP trains on real dynamics and the cost prices real risk; only
+# control_policy's INPUT is zero-order-held. Putting Viscosity in this set would make
+# extract_state feed the GP itself with already-delayed data, which is incompatible with
+# that split. Kept as dormant infrastructure in case X/P ever want the simpler
+# "delayed everywhere" treatment.
+DELAYED_OFFLINE_NAMES = set()
 
 # STATE_LOG_CHANNELS = {"S", "Wt", "X", "P"}
 STATE_LOG_CHANNELS = {"Wt", "X", "P"}
@@ -316,17 +323,105 @@ PROBE_SHAPES = {
 }
 
 
+# MC-PILCO4PMS-style Viscosity delay: 12h lab-assay sampling cadence + 4h analysis turnaround
+# (matches peni_env_setup.py's Off_line_m/Off_line_delay). Unlike DELAYED_OFFLINE_NAMES above,
+# this ONLY affects what control_policy is called with -- see _ZOHPolicyProxy and
+# PenSimMCPILCODelayed -- never extract_state's output, which stays the true instantaneous value.
+VISC_SAMPLE_INTERVAL_H = 12.0
+VISC_ANALYSIS_DELAY_H = 4.0
+VISC_IDX = STATE_NAMES.index("Viscosity")
+
+
+def build_release_table(num_decisions, T_sampling, sample_interval_h, analysis_delay_h):
+    """held_source[d] = decision index of the most recently RELEASED lab sample as of decision
+    d (None if no sample has ever been released yet -- e.g. very early decisions when
+    analysis_delay_h > T_sampling -- which naturally falls back to the true current state,
+    same as the real protocol: there's nothing to hold yet).
+
+    `source_decision = floor(epoch / T_sampling)` snaps each sample down to the latest
+    decision-grid point at/before it was actually drawn (never a decision after -- staying
+    causal), which makes the realized delay slightly MORE conservative (staler) than the
+    continuous-time 4-16h sawtooth, never optimistic. The table is periodic with period
+    lcm(T_sampling, sample_interval_h) (60h / 12 decisions for the defaults) -- useful as a
+    unit-test invariant.
+    """
+    releases = []
+    n = 0
+    while True:
+        epoch = n * sample_interval_h
+        source_decision = int(np.floor(epoch / T_sampling))
+        release_decision = int(np.ceil((epoch + analysis_delay_h) / T_sampling))
+        if source_decision >= num_decisions and release_decision >= num_decisions:
+            break
+        releases.append((release_decision, source_decision))
+        n += 1
+    held = [None] * num_decisions
+    for d in range(num_decisions):
+        candidates = [src for (rel, src) in releases if rel <= d]
+        held[d] = candidates[-1] if candidates else None
+    return held
+
+
+class _ZOHPolicyProxy:
+    """Wraps a policy callable so `idx` channels are zero-order-held from the most recently
+    released sample (per held_source[t]); every other channel passes through unchanged.
+    Shape-agnostic (`state[..., idx]`) -- works for the real rollout's 1D per-decision numpy
+    state and the particle rollout's 2D (num_particles, state_dim) torch tensor alike, and for
+    both call conventions (`policy(state, t)` and `control_policy(state, t=t, p_dropout=...)`)
+    since `t` binds positionally-or-by-keyword either way."""
+
+    def __init__(self, policy, held_source, idx):
+        self._policy = policy
+        self._held_source = held_source
+        self._idx = list(idx)
+        self._buf = []
+
+    def __call__(self, state, t, **kwargs):
+        self._buf.append(state)
+        # self._buf[i] is only guaranteed to be the state at decision i because calls arrive in
+        # strict 0,1,2,... order (true for every current caller -- see class docstring). If a
+        # future change to the vendored apply_policy loop ever violates that, this must fail
+        # loudly (wrong buffer index -> silently wrong held state) rather than train on garbage.
+        assert len(self._buf) == t + 1, (
+            f"_ZOHPolicyProxy called out of order: t={t} but this is call #{len(self._buf)} "
+            "-- buffer indexing assumes strictly sequential calls starting at t=0"
+        )
+        src = self._held_source[t] if t < len(self._held_source) else self._held_source[-1]
+        if src is not None and src != t:
+            held = self._buf[src]
+            state = state.clone() if torch.is_tensor(state) else state.copy()
+            state[..., self._idx] = held[..., self._idx]
+        return self._policy(state, t, **kwargs)
+
+    def __getattr__(self, name):
+        # Dunder lookups (__deepcopy__, __reduce_ex__, ...) must fail fast, not delegate: since
+        # _policy is set in __init__'s first line, __getattr__ should never fire for it under
+        # normal use -- but copy.deepcopy/pickle probe dunders via getattr BEFORE __init__ runs
+        # (e.g. on a bare __new__'d instance), and delegating would recurse into looking up
+        # `self._policy` itself (also missing), causing infinite recursion instead of a clean
+        # AttributeError.
+        if name.startswith("_"):
+            raise AttributeError(name)
+        return getattr(self._policy, name)
+
+
 class PenSimWrapper:
     """One PenSimPy batch: recipe warmup -> PAA-increment RL control, as MC-PILCO arrays."""
 
-    def __init__(self, seed_offset=0, use_offline_measurements=False):
+    def __init__(self, seed_offset=0, use_offline_measurements=False, pms_visc_delay=False):
         self.seed_offset = seed_offset
         # When True, X/P/Viscosity in the decision-level state (fed to the GP, cost, and
         # policy alike -- see extract_state) come from the delayed lab-assay proxy instead
         # of the always-available online ODE state. Default False preserves today's
         # behavior for every existing caller (setup_recipe_anchors, setup_high_feed_probes,
-        # _measure_init_state_stats, ...).
+        # _measure_init_state_stats, ...). Currently inert (DELAYED_OFFLINE_NAMES is empty).
         self.use_offline_measurements = use_offline_measurements
+        # When True, wraps rollout()'s policy argument with _ZOHPolicyProxy so Viscosity is
+        # zero-order-held from the most recently released 12h/4h lab sample -- MC-PILCO4PMS
+        # style: only the policy's INPUT is degraded; `states`/GP training/cost still get the
+        # true instantaneous Viscosity extract_state always returns. Default False preserves
+        # today's behavior.
+        self.pms_visc_delay = pms_visc_delay
         self._episode = 0
         self._recipe = self._build_default_recipe()
         self.monitor = []
@@ -352,6 +447,9 @@ class PenSimWrapper:
         spd = STEPS_PER_DECISION
         k_warm = K_WARM
         n_decisions = int(T / dt)
+        if self.pms_visc_delay:
+            held = build_release_table(n_decisions + 1, dt, VISC_SAMPLE_INTERVAL_H, VISC_ANALYSIS_DELAY_H)
+            policy = _ZOHPolicyProxy(policy, held, [VISC_IDX])
         states = np.zeros((n_decisions + 1, STATE_DIM))
         inputs = np.zeros((n_decisions + 1, ACTION_DIM))
         mon = {a: [] for a in ("t", "PAA", "Viscosity", "Wt", "P", "Fs", "Fpaa", "discharge", "yield_per_run")}
@@ -601,6 +699,43 @@ class PenSimMCPILCO(MCP.MC_PILCO):
         return super().apply_policy(*args, **kwargs)
 
 
+class PenSimMCPILCODelayed(PenSimMCPILCO):
+    """MC-PILCO4PMS-style split for Viscosity only: GP dynamics + cost still see the TRUE
+    particle trajectory (states_sequence_list, per base MC_PILCO.apply_policy's contract,
+    unchanged in MC_PILCO4PMS too -- MC-PILCO/policy_learning/MC_PILCO.py:906); only what
+    control_policy is CALLED WITH has Viscosity zero-order-held from the most recently
+    released 12h/4h lab-assay sample -- mirroring PenSimWrapper.rollout's real-system
+    treatment (pms_visc_delay) so imagined rollouts match what the deployed policy actually
+    observes.
+
+    Swaps self.control_policy for a _ZOHPolicyProxy for the duration of a single
+    apply_policy() call via object.__setattr__ (control_policy is a registered nn.Module
+    submodule, so plain assignment would raise TypeError), then restores it. Safe because
+    apply_policy touches self.control_policy only via __call__ (MC_PILCO.py:660/671), and
+    the swap window never spans reinforce_policy's other self.control_policy accesses
+    (.parameters()/.reinit(), MC_PILCO.py:454/468/558/577/605) -- those happen before/after
+    this call, never during it.
+
+    Gated on self.system.pms_visc_delay (the SAME flag PenSimWrapper.rollout checks for the
+    real-system side) so this class is a single, permanently-safe on/off switch: passing
+    pms_visc_delay=False into get_config()/PenSimWrapper turns Viscosity fully back online in
+    BOTH the real and imagined rollouts without touching which agent class is instantiated --
+    no need to fall back to PenSimMCPILCO/PenSimMCPILCOMultiPhase.
+    """
+
+    def apply_policy(self, *args, **kwargs):
+        if not self.system.pms_visc_delay:
+            return super().apply_policy(*args, **kwargs)
+        held = build_release_table(int(kwargs["T_control"]), self.T_sampling,
+                                    VISC_SAMPLE_INTERVAL_H, VISC_ANALYSIS_DELAY_H)
+        real_policy = self.control_policy
+        object.__setattr__(self, "control_policy", _ZOHPolicyProxy(real_policy, held, [VISC_IDX]))
+        try:
+            return super().apply_policy(*args, **kwargs)
+        finally:
+            object.__setattr__(self, "control_policy", real_policy)
+
+
 class PenSimMCPILCOMultiPhase(PenSimMCPILCO):
     """Dual-phase variant: self.model_learning is a DualPhaseModelLearning (see
     model_learning_dual_phase.py) that BLENDS phase-1/phase-2 GP predictions via a sigmoid
@@ -634,3 +769,29 @@ class PenSimMCPILCOMultiPhase(PenSimMCPILCO):
     def setup_high_feed_probes(self, *args, **kwargs):
         raise NotImplementedError(
             "setup_high_feed_probes is not supported with PenSimMCPILCOMultiPhase")
+
+
+class PenSimMCPILCOMultiPhaseDelayed(PenSimMCPILCOMultiPhase):
+    """Dual-phase counterpart of PenSimMCPILCODelayed: same MC-PILCO4PMS-style Viscosity
+    split (see that class's docstring), composed on top of PenSimMCPILCOMultiPhase rather
+    than duplicated ad hoc. super().apply_policy(*args, **kwargs) here resolves to
+    PenSimMCPILCOMultiPhase.apply_policy (reset_step_counter + optim_horizon_steps assert),
+    which itself chains to PenSimMCPILCO.apply_policy (T_control clamp) and then the base
+    MC_PILCO.apply_policy loop -- so the proxy swap composes correctly regardless of how
+    many layers of apply_policy overrides sit in between.
+
+    Gated on self.system.pms_visc_delay, same as PenSimMCPILCODelayed -- see that class's
+    docstring.
+    """
+
+    def apply_policy(self, *args, **kwargs):
+        if not self.system.pms_visc_delay:
+            return super().apply_policy(*args, **kwargs)
+        held = build_release_table(int(kwargs["T_control"]), self.T_sampling,
+                                    VISC_SAMPLE_INTERVAL_H, VISC_ANALYSIS_DELAY_H)
+        real_policy = self.control_policy
+        object.__setattr__(self, "control_policy", _ZOHPolicyProxy(real_policy, held, [VISC_IDX]))
+        try:
+            return super().apply_policy(*args, **kwargs)
+        finally:
+            object.__setattr__(self, "control_policy", real_policy)

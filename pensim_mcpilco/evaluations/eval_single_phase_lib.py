@@ -70,7 +70,8 @@ MODEL_STYLE = dict(color="C0", lw=2.0, zorder=5)
 _GET_CONFIG_KEY_RENAME = {"optim_horizon": "optim_horizon_steps"}
 _GET_CONFIG_KEYS = ("seed", "num_trials", "fast", "optim_horizon_steps", "num_anchor_batches",
                     "num_anchors", "anchor_var", "risk_weight", "visc_penalty",
-                    "constraint_strength", "harvest_reward", "num_high_feed_probes")
+                    "constraint_strength", "harvest_reward", "num_high_feed_probes",
+                    "pms_visc_delay")
 
 
 def _build_cfg_kwargs(params):
@@ -79,6 +80,12 @@ def _build_cfg_kwargs(params):
         k2 = _GET_CONFIG_KEY_RENAME.get(k, k)
         if k2 in _GET_CONFIG_KEYS:
             out[k2] = v
+    # pms_visc_delay predates this key existing in note.txt at all: runs written before it was
+    # added to run_params have no such line, and MUST NOT fall through to get_config's own
+    # default (True) -- absent means "trained before this feature existed", i.e. no delay.
+    # get_config's default stays True because THAT default governs fresh/manual get_config()
+    # calls (e.g. a brand new training run), a separate concern from reconstructing a past run.
+    out.setdefault("pms_visc_delay", False)
     return out
 
 
@@ -324,7 +331,10 @@ def _assert_policy_state_dim_ok(np_policy, label):
 def build_policy_agent(run):
     """Build a PenSimMCPILCO, load the trained policy (last saved trial) from run.log, and
     roll a same-seed recipe reference batch."""
-    eval_wrapper = PenSimWrapper()
+    # run.cfg["wrapper_par"]["pms_visc_delay"] reflects what THIS run actually used (read from
+    # note.txt via _build_cfg_kwargs, defaulting to False for pre-existing runs that predate the
+    # key) -- NOT get_config's own default, which would silently misjudge older runs.
+    eval_wrapper = PenSimWrapper(**run.cfg["wrapper_par"])
     policy_agent = PenSimMCPILCO(pensim_wrapper=eval_wrapper, **run.cfg["mc_pilco_init"])
     folder = str(run.dir).rstrip("/") + "/"
     with contextlib.redirect_stdout(io.StringIO()):

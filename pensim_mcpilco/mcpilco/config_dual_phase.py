@@ -28,7 +28,8 @@ from mcpilco.pensim_wrapper import (STATE_DIM,
 
 def get_config(seed=1, num_trials=10, fast=False, dtype=torch.float64, device=torch.device("cuda" if torch.cuda.is_available() else "cpu"),
                pivot_hours=PIVOT_HOURS, blend_half_width_hours=BLEND_HALF_WIDTH_HOURS,
-               risk_weight=0.0, visc_penalty=0.02, harvest_reward=True, constraint_strength=1.5):
+               risk_weight=0.0, visc_penalty=0.02, harvest_reward=True, constraint_strength=1.5,
+               pms_visc_delay=True):
     """Dual-phase config: same policy/cost/exploration as config_single_phase.get_config, but
     f_model_learning is DualPhaseModelLearning -- two independent Model_learning_RBF_det_time
     instances, each with the SAME per-channel init as the single-phase model, fit on disjoint
@@ -177,7 +178,11 @@ def get_config(seed=1, num_trials=10, fast=False, dtype=torch.float64, device=to
         "policy_optimization_dict": policy_optimization_dict,
     }
 
-    wrapper_par = {"seed_offset": seed * 1000, "use_offline_measurements": True}
+    # An explicit parameter (not a bare literal) so it round-trips through note.txt/eval's
+    # config reconstruction (see eval_single_phase_lib.py's _GET_CONFIG_KEYS/_build_cfg_kwargs)
+    # instead of every reconstruction silently assuming today's default regardless of what a
+    # given saved run actually used.
+    wrapper_par = {"seed_offset": seed * 1000, "pms_visc_delay": pms_visc_delay}
 
     return {"mc_pilco_init": mc_pilco_init, "reinforce_par": reinforce_par,
             "wrapper_par": wrapper_par}

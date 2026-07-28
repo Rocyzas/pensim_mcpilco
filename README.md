@@ -166,6 +166,10 @@ Now making viscosity offline
 Singlephase seed3_39 and multiphase seed3_6
 
 
+Infering offline viscosity using MC-PILCO4PMS
+Singlephase seed3_40 and multiphase seed3_7
+
+
 
 seed3_103 = seed3_104 - MassFunc, T=2, no probs
 seed3_100 =           - PeniConc  T=2, no prbs, 

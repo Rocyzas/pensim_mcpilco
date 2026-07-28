@@ -13,7 +13,7 @@ _sys.path.insert(0, _ROOT)
 _sys.path.insert(0, _os.path.dirname(_ROOT))
 
 from mcpilco.config_dual_phase import get_config
-from mcpilco.pensim_wrapper import (PenSimWrapper, PenSimMCPILCOMultiPhase,
+from mcpilco.pensim_wrapper import (PenSimWrapper, PenSimMCPILCOMultiPhaseDelayed,
                                     PIVOT_HOURS, BLEND_HALF_WIDTH_HOURS)
 
 _RESULTS_ROOT = Path(_ROOT) / "results" / "dual_phase"
@@ -56,11 +56,14 @@ def main(seed=1, num_trials=10, fast=False, out_dir=None, pivot_hours=PIVOT_HOUR
                   "pivot_hours": pivot_hours, "blend_half_width_hours": blend_half_width_hours,
                   "risk_weight": risk_weight,
                   "visc_penalty": visc_penalty, "constraint_strength": constraint_strength,
-                  "harvest_reward": harvest_reward}
+                  "harvest_reward": harvest_reward,
+                  # Read back from cfg (not re-hardcoded here) so note.txt can never drift from
+                  # what the wrapper actually used.
+                  "pms_visc_delay": cfg["wrapper_par"]["pms_visc_delay"]}
     _write_note(log_path, run_params, cfg)
 
     wrapper = PenSimWrapper(**cfg["wrapper_par"])
-    agent = PenSimMCPILCOMultiPhase(pensim_wrapper=wrapper, **cfg["mc_pilco_init"])
+    agent = PenSimMCPILCOMultiPhaseDelayed(pensim_wrapper=wrapper, **cfg["mc_pilco_init"])
     agent.reinforce(**cfg["reinforce_par"])
 
     # constraint plots
