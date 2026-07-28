@@ -41,11 +41,13 @@ def _write_note(log_path, run_params, cfg):
 
 def main(seed=1, num_trials=10, fast=False, out_dir=None,
          optim_horizon=None, num_anchor_batches=0, num_anchors=None, anchor_var=0.01,
-         risk_weight=0.0, visc_penalty=0.5, harvest_reward=True, num_high_feed_probes=0):
+         risk_weight=0.0, visc_penalty=0.02, constraint_strength=1.5, harvest_reward=True,
+         num_high_feed_probes=0):
     cfg = get_config(seed=seed, num_trials=num_trials, fast=fast,
                      optim_horizon_steps=optim_horizon, num_anchor_batches=num_anchor_batches,
                      num_anchors=num_anchors, anchor_var=anchor_var, risk_weight=risk_weight,
-                     visc_penalty=visc_penalty, harvest_reward=harvest_reward,
+                     visc_penalty=visc_penalty, constraint_strength=constraint_strength,
+                     harvest_reward=harvest_reward,
                      num_high_feed_probes=num_high_feed_probes)
     log_path = out_dir if out_dir is not None else _next_run_dir(seed)
     cfg["mc_pilco_init"]["log_path"] = log_path
@@ -55,6 +57,7 @@ def main(seed=1, num_trials=10, fast=False, out_dir=None,
                   "optim_horizon": optim_horizon, "num_anchor_batches": num_anchor_batches,
                   "num_anchors": num_anchors, "anchor_var": anchor_var,
                   "risk_weight": risk_weight, "visc_penalty": visc_penalty,
+                  "constraint_strength": constraint_strength,
                   "harvest_reward": harvest_reward, "num_high_feed_probes": num_high_feed_probes}
     _write_note(log_path, run_params, cfg)
 
@@ -92,9 +95,14 @@ if __name__ == "__main__":
     # The std runs ~25x the mean cost here, so useful values are small: ~0.005-0.02.
     p.add_argument("--risk_weight", type=float, default=0.0,
                    help="PARTICLE SPREAD PENTALTY. weight on imagined-outcome spread in the objective (0 = disabled)")
-    # cost-shaping terms (see penicillin_cost.PeniConcentrationCost)
-    p.add_argument("--visc_penalty", type=float, default=0.5,
-                   help="quadratic penalty weight on broth viscosity above VISC_MAX (0 = disabled)")
+    # cost-shaping terms (see penicillin_cost.PeniConcentrationCost). Defaults (0.02/1.5) match
+    # the values validated via evaluations/cost_term_report.py's constraint_strength sweep --
+    # see that script's module docstring for the calibration methodology.
+    p.add_argument("--visc_penalty", type=float, default=0.02,
+                   help="lambda_visc: viscosity-collapse constraint weight (0 = disabled)")
+    p.add_argument("--constraint_strength", type=float, default=1.5,
+                   help="global knob scaling soft_penalty/visc_penalty/risk_weight together "
+                        "(see penicillin_cost.py; NOT used to scale rate_penalty)")
     p.add_argument("--no_harvest_reward", dest="harvest_reward", action="store_false",
                    help="score only in-tank mass, ignoring penicillin drawn off by the discharge "
                         "pulses (~20%% of batch_yield_kg). Default is to credit it.")
@@ -110,4 +118,5 @@ if __name__ == "__main__":
          optim_horizon=args.optim_horizon, num_anchor_batches=args.num_anchor_batches,
          num_anchors=args.num_anchors, anchor_var=args.anchor_var,
          risk_weight=args.risk_weight, visc_penalty=args.visc_penalty,
+         constraint_strength=args.constraint_strength,
          harvest_reward=args.harvest_reward, num_high_feed_probes=args.num_high_feed_probes)

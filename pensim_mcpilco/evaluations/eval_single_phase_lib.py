@@ -70,7 +70,7 @@ MODEL_STYLE = dict(color="C0", lw=2.0, zorder=5)
 _GET_CONFIG_KEY_RENAME = {"optim_horizon": "optim_horizon_steps"}
 _GET_CONFIG_KEYS = ("seed", "num_trials", "fast", "optim_horizon_steps", "num_anchor_batches",
                     "num_anchors", "anchor_var", "risk_weight", "visc_penalty",
-                    "harvest_reward", "num_high_feed_probes")
+                    "constraint_strength", "harvest_reward", "num_high_feed_probes")
 
 
 def _build_cfg_kwargs(params):

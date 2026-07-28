@@ -29,7 +29,7 @@ from mcpilco.pensim_wrapper import (STATE_DIM,
 
 def get_config(seed=1, num_trials=10, fast=False, dtype=torch.float64, device=torch.device("cuda" if torch.cuda.is_available() else "cpu"),
                optim_horizon_steps=None, num_anchor_batches=0, num_anchors=12, anchor_var=0.01,
-               risk_weight=0.0, visc_penalty=0.02, harvest_reward=True, constraint_strength=1.0,
+               risk_weight=0.0, visc_penalty=0.02, harvest_reward=True, constraint_strength=1.5,
                num_high_feed_probes=0, high_feed_levels=(0.6, 0.8, 1.0)):
     torch.manual_seed(seed)
     np.random.seed(seed)
@@ -143,10 +143,15 @@ def get_config(seed=1, num_trials=10, fast=False, dtype=torch.float64, device=to
         # this outcome-std formulation (e.g. via std_cost_trial_list) before relying on it.
         # constraint_strength: single global knob, multiplies soft_penalty, visc_penalty AND
         # risk_weight together ("how conservative overall"); 1.0 = exactly what those three specify.
+        # visc_penalty/constraint_strength used to be hardcoded literals here (0.02/1.5),
+        # silently ignoring whatever was passed into get_config()/the CLI --visc_penalty flag.
+        # The literals happened to match this function's own defaults (see above), so default
+        # behaviour is unchanged by wiring them as real parameters -- but --visc_penalty on
+        # 02_mcpilco_single_phase.py previously had NO EFFECT at all; it does now.
         "cost_function_par": {"p_weight": 0.05, "soft_penalty": 0.05, "rate_penalty": 0.02,
-                              "risk_weight": 0.0, "visc_penalty": 0.02,
+                              "risk_weight": risk_weight, "visc_penalty": visc_penalty,
                               "harvest_reward": harvest_reward,
-                              "constraint_strength": 1.5},
+                              "constraint_strength": constraint_strength},
         # CHANGED_THIS
         "std_meas_noise": std_meas_noise,
         "log_path": f"results/single_phase/seed{seed}",

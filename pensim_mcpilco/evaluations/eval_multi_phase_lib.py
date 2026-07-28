@@ -23,6 +23,11 @@ things are genuinely different here, not just renamed -- see reconstruct_gp_agen
 C.7 (short-horizon/anchor diagnostic) from the single-phase notebook is intentionally NOT
 ported: anchors/optim-horizon are an unsupported combination with dual-phase (see
 PenSimMCPILCOMultiPhase's docstring), so there is nothing meaningful for it to show here.
+
+DualPhaseModelLearning blends phase1/phase2 predictions via a sigmoid centered on
+run.pivot_hours (not a hard switch) -- `_mark_pivot` shades the ~1%-99% transition window
+(pivot +- run.blend_half_width_hours) on every full-batch time-axis plot, not just a single
+cutoff line, since predictions genuinely mix both phases within that window.
 """
 import ast
 import contextlib
@@ -75,8 +80,8 @@ MODEL_STYLE = dict(color="C0", lw=2.0, zorder=5)
 # get_config kwargs recoverable from note.txt's "== run parameters ==" block (see
 # _write_note() in experiments/03_mcpilco_dual_phase.py). Anything else written there
 # (out_dir) isn't a get_config kwarg and is dropped when building cfg.
-_GET_CONFIG_KEYS = ("seed", "num_trials", "fast", "pivot_hours", "risk_weight",
-                    "visc_penalty", "harvest_reward")
+_GET_CONFIG_KEYS = ("seed", "num_trials", "fast", "pivot_hours", "blend_half_width_hours",
+                    "risk_weight", "visc_penalty", "constraint_strength", "harvest_reward")
 
 
 # ---------------------------------------------------------------------------
@@ -133,7 +138,11 @@ class Run:
 
     @property
     def pivot_hours(self):
-        return float(self.params.get("pivot_hours", 100.0))
+        return float(self.params.get("pivot_hours", 90.0))
+
+    @property
+    def blend_half_width_hours(self):
+        return float(self.params.get("blend_half_width_hours", 40.0))
 
 
 def log_state_dims(log):
@@ -223,7 +232,7 @@ def load_run(run_id_or_path):
     train_seed = cfg["wrapper_par"]["seed_offset"]
 
     print(f"run: {run_dir}  |  episodes: {n_ep}  |  trials in log: {n_trials_in_log}  |  "
-         f"pivot: {cfg_kwargs.get('pivot_hours', 100.0):g} h")
+         f"pivot: {cfg_kwargs.get('pivot_hours', 90.0):g} h")
 
     return Run(dir=run_dir, params=all_params, cfg=cfg, log=log, monitors=monitors,
               n_ep=n_ep, n_trials_in_log=n_trials_in_log,
@@ -274,10 +283,16 @@ def _episode_colorbar(fig, ax, n_ep, n_expl, label="trial (early -> late)"):
     return cb
 
 
-def _mark_pivot(ax, pivot_hours):
-    """Vertical marker at the dual-phase pivot -- where DualPhaseModelLearning switches from
-    phase-1 to phase-2 GPs -- on any panel whose x-axis is batch time."""
+def _mark_pivot(ax, pivot_hours, blend_half_width_hours=None):
+    """Marker at the dual-phase pivot -- the CENTER of the sigmoid blend that combines
+    phase-1/phase-2 GP predictions -- on any panel whose x-axis is batch time. When
+    blend_half_width_hours is given, also shades the ~1%-99% transition window
+    (pivot +- half_width) so the plot shows a region, not a hard cutoff that no longer exists."""
     for a in np.atleast_1d(ax).ravel():
+        if blend_half_width_hours is not None:
+            a.axvspan(pivot_hours - blend_half_width_hours, pivot_hours + blend_half_width_hours,
+                      color="purple", alpha=0.06, zorder=0,
+                      label=f"blend window (+-{blend_half_width_hours:g} h)")
         a.axvline(pivot_hours, color="purple", ls=":", lw=1.2, label=f"pivot ({pivot_hours:g} h)")
 
 
@@ -658,7 +673,7 @@ def plot_training_progression(run, ref, ref_lbl, out_dir, show=False):
     ax[1, 2].set_xlabel("episode"); ax[1, 2].set_ylabel("yield (kg)")
     ax[1, 2].grid(alpha=.3, axis="y")
 
-    _mark_pivot([ax[0, 1], ax[0, 2], ax[1, 0], ax[1, 1]], run.pivot_hours)
+    _mark_pivot([ax[0, 1], ax[0, 2], ax[1, 0], ax[1, 1]], run.pivot_hours, run.blend_half_width_hours)
     for a in (ax[0, 0], ax[0, 1], ax[0, 2], ax[1, 0], ax[1, 1], ax[1, 2]):
         a.legend(fontsize=6, ncol=2)
 
@@ -689,7 +704,7 @@ def plot_all_observations(run, ref, ref_lbl, out_dir, show=False):
         if name == "PAA":
             a.axhspan(*PAA_BAND, color="green", alpha=.12, label="allowed band")
         a.axvline(WARMUP_H, color="gray", ls=":", lw=.8)
-        _mark_pivot(a, run.pivot_hours)
+        _mark_pivot(a, run.pivot_hours, run.blend_half_width_hours)
         _lo_p, _hi_p = decode_state_value(name, lo), decode_state_value(name, hi)
         a.set_title(name); a.set_xlabel("time (h)"); a.set_ylabel(f"{name} (range {_lo_p:g}..{_hi_p:g})")
         a.grid(alpha=.3)
@@ -874,7 +889,8 @@ def one_step_fit(gp_agent, gp_idx, out_dir, show=False):
     return per_dim_mse, results
 
 
-def plot_multistep_rollout(gp_agent, gp_idx, ho_idx, has_ho, out_dir, pivot_hours, show=False):
+def plot_multistep_rollout(gp_agent, gp_idx, ho_idx, has_ho, out_dir, pivot_hours,
+                           blend_half_width_hours=None, show=False):
     with torch.no_grad():
         pred, true, _ = gp_agent.get_rollout_prediction_performance(gp_idx)
         if has_ho:
@@ -905,7 +921,7 @@ def plot_multistep_rollout(gp_agent, gp_idx, ho_idx, has_ho, out_dir, pivot_hour
     ax[1].set_title("Multi-step P: in-sample vs held-out")
     ax[1].set_xlabel("time (h)"); ax[1].set_ylabel("P (g/L)"); ax[1].grid(alpha=.3)
 
-    _mark_pivot(ax, pivot_hours)
+    _mark_pivot(ax, pivot_hours, blend_half_width_hours)
     for a in ax:
         a.legend(fontsize=7)
     fig.suptitle(f"GP-vs-simulator multi-step diagnostic — model@trial {gp_idx}"
@@ -938,7 +954,8 @@ def _particle_rollout(agent, idx, N=100, seed=0):
     return out
 
 
-def plot_particle_bands(gp_agent, gp_idx, ho_idx, has_ho, out_dir, pivot_hours, n_part=100, show=False):
+def plot_particle_bands(gp_agent, gp_idx, ho_idx, has_ho, out_dir, pivot_hours,
+                        blend_half_width_hours=None, n_part=100, show=False):
     with torch.no_grad():
         pred, _, _ = gp_agent.get_rollout_prediction_performance(gp_idx)
     cols = [(gp_idx, "IN-SAMPLE", pred)]
@@ -970,7 +987,7 @@ def plot_particle_bands(gp_agent, gp_idx, ho_idx, has_ho, out_dir, pivot_hours, 
             a.plot(t_, truth, "k-", lw=1.8, label="simulator (truth)")
             a.plot(t_, mline, "C1--", lw=1.8, label="GP mean rollout")
             a.plot(t_, p50, "C0-", lw=1.5, label="GP particle median")
-            _mark_pivot(a, pivot_hours)
+            _mark_pivot(a, pivot_hours, blend_half_width_hours)
             a.set_xlim(*xlim); a.set_ylim(lo_p - pad, hi_p + pad)
             a.set_title(f"{name} - {tag} (batch {bidx})", fontsize=9)
             a.set_ylabel(name, fontsize=8); a.grid(alpha=.3); a.tick_params(labelsize=7)
@@ -1057,7 +1074,8 @@ def _one_step_abs_err(agent, batch_idx):
     return grid[:-1], eX, eP
 
 
-def plot_local_error(gp_agent, gp_idx, ho_idx, has_ho, out_dir, pivot_hours, show=False):
+def plot_local_error(gp_agent, gp_idx, ho_idx, has_ho, out_dir, pivot_hours,
+                     blend_half_width_hours=None, show=False):
     t_in, eX_in, eP_in = _one_step_abs_err(gp_agent, gp_idx)
     if has_ho:
         t_ho, eX_ho, eP_ho = _one_step_abs_err(gp_agent, ho_idx)
@@ -1081,7 +1099,7 @@ def plot_local_error(gp_agent, gp_idx, ho_idx, has_ho, out_dir, pivot_hours, sho
         a.set_title(f"One-step |error| vs batch time — {name}")
         a.set_xlabel("batch time at prediction origin (h)"); a.set_ylabel(f"one-step |error| ({name}, g/L)")
         a.grid(alpha=.3); a.legend(fontsize=7)
-    _mark_pivot(ax, pivot_hours)
+    _mark_pivot(ax, pivot_hours, blend_half_width_hours)
     fig.suptitle("Local (one-step) GP error across the batch")
     fig.tight_layout()
     _finish(fig, out_dir, "C5_local_error.png", show)

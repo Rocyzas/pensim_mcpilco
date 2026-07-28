@@ -21,17 +21,21 @@ from mcpilco.pensim_wrapper import (STATE_DIM,
                                     TIME_IDX,
                                     TIME_INIT_VAR,
                                     PIVOT_HOURS,
+                                    BLEND_HALF_WIDTH_HOURS,
                                     initial_state_norm,
                                     initial_state_var_norm)
 
 
 def get_config(seed=1, num_trials=10, fast=False, dtype=torch.float64, device=torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-               pivot_hours=PIVOT_HOURS,
-               risk_weight=0.0, visc_penalty=0.02, harvest_reward=True, constraint_strength=1.0):
+               pivot_hours=PIVOT_HOURS, blend_half_width_hours=BLEND_HALF_WIDTH_HOURS,
+               risk_weight=0.0, visc_penalty=0.02, harvest_reward=True, constraint_strength=1.5):
     """Dual-phase config: same policy/cost/exploration as config_single_phase.get_config, but
     f_model_learning is DualPhaseModelLearning -- two independent Model_learning_RBF_det_time
-    instances (phase 1: decision < pivot_step, phase 2: decision >= pivot_step), each with the
-    SAME per-channel init as the single-phase model, fit on disjoint slices of every batch.
+    instances, each with the SAME per-channel init as the single-phase model, fit on disjoint
+    slices of every batch (hard split at pivot_step, decision < pivot_step -> phase 1). Their
+    predictions are BLENDED at rollout time via a sigmoid centered on pivot_hours (also the
+    training-split point) with the given blend_half_width_hours -- see
+    model_learning_dual_phase.py.
 
     Unsupported here (see PenSimMCPILCOMultiPhase docstring): recipe anchors, high-feed
     probes, optim_horizon_steps -- their launch states don't carry the absolute decision time
@@ -83,6 +87,8 @@ def get_config(seed=1, num_trials=10, fast=False, dtype=torch.float64, device=to
 
     model_learning_par = {
         "pivot_step": pivot_step,
+        "pivot_hours": pivot_hours,
+        "blend_half_width_hours": blend_half_width_hours,
         "phase1_par": _phase_model_learning_par(),
         "phase2_par": _phase_model_learning_par(),
         "dtype": dtype, "device": device,

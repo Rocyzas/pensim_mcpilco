@@ -54,12 +54,20 @@ K_WARM = max(1, int(round(WARMUP_H / STEP_IN_HOURS)))
 WARMUP_H_EFF = K_WARM * STEP_IN_HOURS
 CONTROL_H = 230.0 - WARMUP_H_EFF
 
-# Manual dual-phase pivot: decision index at which DualPhaseModelLearning switches from
-# phase-1 to phase-2 GPs (see model_learning_dual_phase.py). Decision index, not hour count,
-# since that's what PenSimMCPILCOMultiPhase.apply_policy/rollout iterate over.
-# PIVOT_HOURS = 100.0
-PIVOT_HOURS = 55.0
+# Dual-phase pivot: PIVOT_HOURS does double duty for DualPhaseModelLearning (see
+# model_learning_dual_phase.py) -- (1) PIVOT_STEP is where training data is HARD-split between
+# phase1/phase2 (unchanged, still a hard boundary), and (2) PIVOT_HOURS is also the CENTER of
+# the sigmoid blend weight w(t) that combines phase1/phase2's predictions at rollout time (see
+# BLEND_HALF_WIDTH_HOURS below). PIVOT_STEP (decision index, not hour count) is what
+# PenSimMCPILCOMultiPhase.apply_policy/rollout iterate over.
+PIVOT_HOURS = 90.0
 PIVOT_STEP = int(round(PIVOT_HOURS / T_SAMPLING))
+
+# Sigmoid blend half-width (hours): with the default PIVOT_HOURS=90, w(t) is ~0.01 at
+# PIVOT_HOURS - BLEND_HALF_WIDTH_HOURS = 50h and ~0.99 at PIVOT_HOURS + BLEND_HALF_WIDTH_HOURS
+# = 130h (the standard "1%/99%" convention for a logistic's effective width -- see
+# DualPhaseModelLearning._blend_weight).
+BLEND_HALF_WIDTH_HOURS = 40.0
 
 FPAA_MIN, FPAA_MAX = 0.0, 15.0
 
@@ -564,12 +572,12 @@ class PenSimMCPILCO(MCP.MC_PILCO):
 
 class PenSimMCPILCOMultiPhase(PenSimMCPILCO):
     """Dual-phase variant: self.model_learning is a DualPhaseModelLearning (see
-    model_learning_dual_phase.py) that routes get_next_state to phase-1/phase-2 GPs based on
-    a decision-step counter. That counter must be reset to 0 at the start of every rollout
-    (apply_policy during policy optimisation, and the diagnostic rollout() in MC_PILCO) --
-    both call get_next_state sequentially in decision order, so resetting once up front and
-    letting the wrapper self-increment is enough to keep it aligned with absolute decision
-    time.
+    model_learning_dual_phase.py) that BLENDS phase-1/phase-2 GP predictions via a sigmoid
+    weight centered on PIVOT_HOURS, based on a decision-step counter. That counter must be
+    reset to 0 at the start of every rollout (apply_policy during policy optimisation, and the
+    diagnostic rollout() in MC_PILCO) -- both call get_next_state sequentially in decision
+    order, so resetting once up front and letting the wrapper self-increment is enough to keep
+    it aligned with absolute decision time.
 
     setup_recipe_anchors/setup_high_feed_probes/optim_horizon_steps are unsupported here:
     they launch particles from arbitrary/relative batch times, which the phase router (keyed

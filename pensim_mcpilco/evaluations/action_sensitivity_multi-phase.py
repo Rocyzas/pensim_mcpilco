@@ -86,8 +86,13 @@ def pivot_step_of(run):
 
 
 def model_phase(j, pivot_step):
-    """Which phase's GP the DEPLOYED composite actually uses to answer a probe launched at
-    decision j (see DualPhaseModelLearning.get_next_state's routing rule)."""
+    """Coarse "which phase dominates" label for decision j -- exact far from the pivot (the
+    composite is ~100% one phase there), but only an approximation inside the sigmoid blend
+    window (see DualPhaseModelLearning._blend_weight): DualPhaseModelLearning.get_next_state no
+    longer routes to exactly one phase, it BLENDS both with a smoothly-varying weight, so a
+    probe at e.g. j==pivot_step is really a ~50/50 mix, not a hard cutover. Still useful for
+    reporting/bucketing (this is what sensitivity_table/sustained_divergence_table group by),
+    just don't read it as "the model that answered this probe" near the boundary."""
     return "phase1" if j < pivot_step else "phase2"
 
 

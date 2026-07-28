@@ -232,15 +232,20 @@ def _save_csv(results, out_dir):
     fieldnames = ["training_seed", "sim_seed", "pivot_a0_hours", "pivot_proxy_hours",
                   "hardcoded_pivot_hours"]
     a0_vals = np.array([r["pivot_a0_hours"] for r in results])
+    proxy_vals = np.array([r["pivot_proxy_hours"] for r in results])
     with open(path, "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=fieldnames)
         w.writeheader()
         for r in results:
             w.writerow({k: r[k] for k in fieldnames})
-        for label, val in (("mean", np.mean(a0_vals)), ("std", np.std(a0_vals)),
-                           ("min", np.min(a0_vals)), ("max", np.max(a0_vals))):
-            w.writerow({"training_seed": label, "sim_seed": "", "pivot_a0_hours": val,
-                        "pivot_proxy_hours": "", "hardcoded_pivot_hours": PIVOT_HOURS})
+        for label, vala0, valprox in (("mean", np.mean(a0_vals), np.mean(proxy_vals)), ("std", np.std(a0_vals), np.std(proxy_vals)),
+                           ("min", np.min(a0_vals), np.min(proxy_vals)), ("max", np.max(a0_vals), np.max(proxy_vals))):
+            w.writerow({"training_seed": label, "sim_seed": "", "pivot_a0_hours": vala0,
+                        "pivot_proxy_hours": valprox, "hardcoded_pivot_hours": PIVOT_HOURS})
+        # for label, val in (("mean", np.mean(proxy_vals)), ("std", np.std(proxy_vals)),
+        #                    ("min", np.min(proxy_vals)), ("max", np.max(proxy_vals))):
+        #     w.writerow({"training_seed": label, "sim_seed": "", "pivot_a0_hours": "",
+        #                 "pivot_proxy_hours": val, "hardcoded_pivot_hours": PIVOT_HOURS})
     print(f"Saved {path}")
     return path
 
