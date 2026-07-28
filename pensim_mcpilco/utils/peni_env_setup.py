@@ -351,18 +351,34 @@ class PenSimEnv:
                 x = self.raman_sim(k, x)
 
         # Off-line measurements recorded
-        if np.remainder(t_tmp, self.ctrl_flags.Off_line_m) == 0 or t_tmp == 1 or t_tmp == BATCH_LENGTH_IN_HOURS:
-            delay = self.ctrl_flags.Off_line_delay
-            x.NH3_offline.y[k - 1] = x.NH3.y[k - delay - 1]
-            x.NH3_offline.t[k - 1] = x.NH3.t[k - delay - 1]
-            x.Viscosity_offline.y[k - 1] = x.Viscosity.y[k - delay - 1]
-            x.Viscosity_offline.t[k - 1] = x.Viscosity.t[k - delay - 1]
-            x.PAA_offline.y[k - 1] = x.PAA.y[k - delay - 1]
-            x.PAA_offline.t[k - 1] = x.PAA.t[k - delay - 1]
-            x.P_offline.y[k - 1] = x.P.y[k - delay - 1]
-            x.P_offline.t[k - 1] = x.P.t[k - delay - 1]
-            x.X_offline.y[k - 1] = x.X.y[k - delay - 1]
-            x.X_offline.t[k - 1] = x.X.t[k - delay - 1]
+        # NOTE: gating on t_tmp (float) instead of k (int) never actually fires in fast=True
+        # mode (used everywhere in this repo): t_tmp = t_end + h_ode always carries a stray
+        # +h_ode (0.005h) offset that self.fast=False's t_tmp = t_span[-1] doesn't, so
+        # remainder(t_tmp, Off_line_m)==0 / t_tmp==1 / t_tmp==BATCH_LENGTH_IN_HOURS are never
+        # exactly satisfied -- X_offline/P_offline/Viscosity_offline/etc. were permanently NaN.
+        # Gate on the integer native-step index k instead: exact, and mode-independent.
+        _offline_sample_every_steps = int(round(self.ctrl_flags.Off_line_m / STEP_IN_HOURS))
+        _offline_edge_step = int(round(1.0 / STEP_IN_HOURS))
+        if k % _offline_sample_every_steps == 0 or k == _offline_edge_step or k == NUM_STEPS:
+            # Off_line_delay is documented (and named) in HOURS, but k indexes the native
+            # STEP_IN_HOURS=0.2h grid -- using it directly as a raw index offset (the original
+            # MATLAB behavior too, see indpensim.m) only delays by Off_line_delay*STEP_IN_HOURS
+            # (0.8h for the default 4), not Off_line_delay hours. Convert to native steps here.
+            # Clamp at 0: the t_tmp==1 early release (k=5) would otherwise index negative once
+            # delay properly spans 4h/20 steps, wrapping to an unpopulated tail element -- clamping
+            # degrades gracefully to "hold the initial condition" instead.
+            delay = int(round(self.ctrl_flags.Off_line_delay / STEP_IN_HOURS))
+            src_idx = max(k - delay - 1, 0)
+            x.NH3_offline.y[k - 1] = x.NH3.y[src_idx]
+            x.NH3_offline.t[k - 1] = x.NH3.t[src_idx]
+            x.Viscosity_offline.y[k - 1] = x.Viscosity.y[src_idx]
+            x.Viscosity_offline.t[k - 1] = x.Viscosity.t[src_idx]
+            x.PAA_offline.y[k - 1] = x.PAA.y[src_idx]
+            x.PAA_offline.t[k - 1] = x.PAA.t[src_idx]
+            x.P_offline.y[k - 1] = x.P.y[src_idx]
+            x.P_offline.t[k - 1] = x.P.t[src_idx]
+            x.X_offline.y[k - 1] = x.X.y[src_idx]
+            x.X_offline.t[k - 1] = x.X.t[src_idx]
         else:
             x.NH3_offline.y[k - 1] = float('nan')
             x.NH3_offline.t[k - 1] = float('nan')

@@ -42,6 +42,12 @@ STATE_NAMES = ["Wt", "X", "P", "Viscosity", "time"]
 STATE_DIM = len(STATE_NAMES)
 ACTION_DIM = 1
 
+# X, P, Viscosity are offline lab assays on the real plant (12h sampling + 4h analysis
+# delay -- see peni_env_setup.py's X_offline/P_offline/Viscosity_offline). Wt and time stay
+# online/undelayed. See _read_offline / _read's use_offline_measurements below.
+# DELAYED_OFFLINE_NAMES = {"X", "P", "Viscosity"}
+DELAYED_OFFLINE_NAMES = {"Viscosity"}
+
 # STATE_LOG_CHANNELS = {"S", "Wt", "X", "P"}
 STATE_LOG_CHANNELS = {"Wt", "X", "P"}
 STATE_LOG_FLOOR = 1e-6
@@ -176,21 +182,39 @@ def batch_yield_kg(mon):
     return float(np.sum(mon["yield_per_run"]))
 
 
-def _read(batch_x, name, i):
+
+def _read_offline(batch_x, name, i):
+    """Most recently RELEASED offline reading at/before native index i (causal
+    zero-order hold between lab-assay results). Falls back to the true online
+    value if no offline sample has been released yet -- only possible in the
+    first ~1h of a batch, before peni_env_setup.py's earliest release fires."""
+    y = getattr(batch_x, name + "_offline").y
+    for j in range(i, -1, -1):
+        if not np.isnan(y[j]):
+            return float(y[j])
+    return float(getattr(batch_x, name).y[i])
+
+
+def _read(batch_x, name, i, use_offline_measurements=False):
     """Physical value of `name` at native index i. pH is stored as 10^(-pH)
     mid-batch, so invert it back to pH units here. `time` is not a batch channel;
-    native index i maps to absolute batch time (i+1)*STEP_IN_HOURS hours."""
+    native index i maps to absolute batch time (i+1)*STEP_IN_HOURS hours.
+    When use_offline_measurements is True, DELAYED_OFFLINE_NAMES channels are read
+    via the delayed/held lab-assay proxy (_read_offline) instead of the always-
+    available online ODE state."""
     if name == "time":
         return (i + 1) * STEP_IN_HOURS
     if name == "pH":
         return -np.log10(max(float(getattr(batch_x, "pH").y[i]), 1e-12))
+    if use_offline_measurements and name in DELAYED_OFFLINE_NAMES:
+        return _read_offline(batch_x, name, i)
     return float(getattr(batch_x, name).y[i])
 
 
-def extract_state(batch_x, k):
+def extract_state(batch_x, k, use_offline_measurements=False):
     i = max(k - 1, 0)
     return np.array([
-        _normalise(encode_state_value(n, _read(batch_x, n, i)), *STATE_RANGES[n])
+        _normalise(encode_state_value(n, _read(batch_x, n, i, use_offline_measurements)), *STATE_RANGES[n])
         for n in STATE_NAMES
     ])
 
@@ -295,8 +319,14 @@ PROBE_SHAPES = {
 class PenSimWrapper:
     """One PenSimPy batch: recipe warmup -> PAA-increment RL control, as MC-PILCO arrays."""
 
-    def __init__(self, seed_offset=0):
+    def __init__(self, seed_offset=0, use_offline_measurements=False):
         self.seed_offset = seed_offset
+        # When True, X/P/Viscosity in the decision-level state (fed to the GP, cost, and
+        # policy alike -- see extract_state) come from the delayed lab-assay proxy instead
+        # of the always-available online ODE state. Default False preserves today's
+        # behavior for every existing caller (setup_recipe_anchors, setup_high_feed_probes,
+        # _measure_init_state_stats, ...).
+        self.use_offline_measurements = use_offline_measurements
         self._episode = 0
         self._recipe = self._build_default_recipe()
         self.monitor = []
@@ -344,7 +374,8 @@ class PenSimWrapper:
                 if not pid_baseline and local % spd == 0 and decision_idx < n_decisions:
 
                     if decision_idx == 0:
-                        states[0] = np.clip(np.nan_to_num(extract_state(bx, k_warm)), -1.0, 1.0)
+                        states[0] = np.clip(np.nan_to_num(
+                            extract_state(bx, k_warm, self.use_offline_measurements)), -1.0, 1.0)
                         last_good = states[0]
 
                     raw = policy(states[decision_idx], decision_idx)
@@ -375,7 +406,7 @@ class PenSimWrapper:
             if k > k_warm and (k - k_warm - 1) % spd == spd - 1:
                 decision_idx += 1
                 if decision_idx <= n_decisions:
-                    s = extract_state(bx, k)
+                    s = extract_state(bx, k, self.use_offline_measurements)
                     s = np.clip(np.where(np.isfinite(s), s, last_good), -1.0, 1.0)
                     last_good = s
                     states[decision_idx] = s

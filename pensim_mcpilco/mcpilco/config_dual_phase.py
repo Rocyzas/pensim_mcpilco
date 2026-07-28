@@ -177,7 +177,7 @@ def get_config(seed=1, num_trials=10, fast=False, dtype=torch.float64, device=to
         "policy_optimization_dict": policy_optimization_dict,
     }
 
-    wrapper_par = {"seed_offset": seed * 1000}
+    wrapper_par = {"seed_offset": seed * 1000, "use_offline_measurements": True}
 
     return {"mc_pilco_init": mc_pilco_init, "reinforce_par": reinforce_par,
             "wrapper_par": wrapper_par}
