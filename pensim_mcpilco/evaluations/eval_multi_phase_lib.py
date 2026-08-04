@@ -57,6 +57,8 @@ from utils.constants import STEP_IN_HOURS
 from PenSimPy.pensimpy.data.constants import FS, FS_DEFAULT_PROFILE
 
 from mcpilco.config_dual_phase import get_config
+from mcpilco.model_learning_det_time import DETERMINISTIC_CHANNELS
+from mcpilco.model_learning_dual_phase import _BLEND_SKIP_EPS
 from mcpilco.pensim_wrapper import (
     PenSimWrapper, PenSimMCPILCOMultiPhase, STATE_NAMES, STATE_DIM, ACTION_DIM,
     STATE_RANGES, decode_state_value, T_SAMPLING, CONTROL_H, K_WARM, VISC_MAX, WARMUP_H,
@@ -82,7 +84,12 @@ MODEL_STYLE = dict(color="C0", lw=2.0, zorder=5)
 # (out_dir) isn't a get_config kwarg and is dropped when building cfg.
 _GET_CONFIG_KEYS = ("seed", "num_trials", "fast", "pivot_hours", "blend_half_width_hours",
                     "risk_weight", "visc_penalty", "constraint_strength", "harvest_reward",
-                    "pms_visc_delay", "use_offline_measurements")
+                    "pms_visc_delay", "use_offline_measurements",
+                    # Both absent in note.txt for runs predating these params -- correctly falls
+                    # through to get_config's own hardcoded defaults in _build_cfg_kwargs below,
+                    # which IS what those older runs actually trained with (no setdefault needed,
+                    # unlike the two Viscosity-delay flags above).
+                    "cost_function", "num_explorations")
 
 
 def _build_cfg_kwargs(params):
@@ -843,6 +850,616 @@ def reconstruct_gp_agent(run, idx=None, get_config_fn=None):
                 sub.pretrain_gp(k)
         sub.set_eval_mode()
     return agent, idx
+
+
+def check_blend_weight_sanity(gp_agent, gp_idx, ho_idx, has_ho, out_dir,
+                              pivot_hours, blend_half_width_hours, show=False):
+    """C.0 -- blend-weight sanity check for DualPhaseModelLearning's sigmoid phase blend.
+
+    _blend_weight(t_step) is a pure function of (t_step, pivot_hours, blend_half_width_hours,
+    T_SAMPLING) -- it does not depend on trained GP state at all -- so this only needs
+    gp_agent.model_learning and the actual per-batch trajectory LENGTH (in decision steps) of
+    a representative rollout, taken from the real in-sample (and held-out, if available)
+    batches already loaded onto gp_agent by reconstruct_gp_agent.
+
+    Reports two distinct weight series per batch, because get_next_state itself uses both:
+      - raw:  w2(t) = model_learning._blend_weight(t), w1(t) = 1 - w2(t) -- the sigmoid itself.
+      - eff:  what get_next_state ACTUALLY applies once the _BLEND_SKIP_EPS threshold snaps it
+              to exactly 0/1 outside +-blend_half_width_hours of the pivot (see its w<=EPS /
+              w>=1-EPS branches) -- this is when a phase becomes the SOLE predictor, not just
+              dominant.
+
+    NOTE on scope: training itself is unaffected by any of this -- add_data still hard-splits
+    each trajectory at pivot_step, so phase1/phase2's own GPs are fit purely on their own
+    side's data regardless of how wide the rollout-time blend is (see add_data's docstring).
+    What a wide blend window actually risks is a rollout-time effect: during planning/particle
+    rollouts, imagined next-states over that window are a genuine MIX of both phases' one-step
+    predictions (see get_next_state's mixture-variance formula), so an off-batch phase can
+    still leak error into the trajectory the policy is optimised against, even though neither
+    phase's own fit was ever "blurred" by the other phase's training data.
+
+    Verifies, and prints a pass/fail line for each:
+      (i)   phase1_weight + phase2_weight == 1 at every step (exact by construction; a
+            mismatch here would mean the blend formula itself has drifted, not a tuning issue).
+      (ii)  weight_phase1 -> 1 early, weight_phase2 -> 1 late (monotonicity of the sigmoid).
+      (iii) a contiguous EARLY window exists with weight_phase1 >= 0.95, and a contiguous LATE
+            window exists with weight_phase2 >= 0.95 -- if either is empty, that phase never
+            reaches near-sole-predictor status anywhere in the batch.
+    Also prints min/max of each weight across the batch, and saves a per-step CSV + a plot."""
+    cols = [(gp_idx, "IN-SAMPLE")]
+    if has_ho:
+        cols.append((ho_idx, "HELD-OUT"))
+
+    fig, ax = plt.subplots(1, len(cols), figsize=(7.5 * len(cols), 4.0), squeeze=False)
+    rows = []
+    summary_lines = []
+    for c, (bidx, tag) in enumerate(cols):
+        T = np.asarray(gp_agent.state_samples_history[bidx]).shape[0]
+        t_ = decision_time_grid(T)
+        raw_w2 = np.array([gp_agent.model_learning._blend_weight(t) for t in range(T)])
+        raw_w1 = 1.0 - raw_w2
+        eff_w2 = np.where(raw_w2 <= _BLEND_SKIP_EPS, 0.0,
+                          np.where(raw_w2 >= 1.0 - _BLEND_SKIP_EPS, 1.0, raw_w2))
+        eff_w1 = 1.0 - eff_w2
+
+        for k in range(T):
+            rows.append({"batch_tag": tag, "batch_idx": bidx, "t_step": k, "t_hours": t_[k],
+                        "w1_phase1_raw": raw_w1[k], "w2_phase2_raw": raw_w2[k],
+                        "w1_phase1_eff": eff_w1[k], "w2_phase2_eff": eff_w2[k]})
+
+        # (i) sums to 1 -- exact by construction, checked anyway (formula-drift guard)
+        max_sum_err = float(np.max(np.abs((raw_w1 + raw_w2) - 1.0)))
+        chk_sum = max_sum_err < 1e-12
+
+        # (ii) monotonic: phase1 weight non-increasing, phase2 weight non-decreasing
+        chk_mono = bool(np.all(np.diff(raw_w1) <= 1e-12) and np.all(np.diff(raw_w2) >= -1e-12))
+
+        # (iii) contiguous windows at >=0.95 (using the EFFECTIVE weight -- what the model
+        # actually runs on -- since that's what "sole predictor" means operationally)
+        early_mask = eff_w1 >= 0.95
+        late_mask = eff_w2 >= 0.95
+        has_early = bool(early_mask[0]) and bool(early_mask.any())
+        has_late = bool(late_mask[-1]) and bool(late_mask.any())
+        early_hi = float(t_[early_mask][-1]) if early_mask.any() else float("nan")
+        late_lo = float(t_[late_mask][0]) if late_mask.any() else float("nan")
+
+        line = (
+            f"[blend sanity | {tag} batch {bidx}, T={T} steps, {t_[0]:.1f}-{t_[-1]:.1f}h]\n"
+            f"  (i)   sum-to-1:      max|w1+w2-1| = {max_sum_err:.2e}  -> {'PASS' if chk_sum else 'FAIL'}\n"
+            f"  (ii)  monotonicity:  phase1 non-increasing & phase2 non-decreasing -> "
+            f"{'PASS' if chk_mono else 'FAIL'}\n"
+            f"  (iii) pure-phase windows (effective weight >= 0.95):\n"
+            f"        phase1: {'0.0-' + format(early_hi, '.1f') + 'h' if has_early else 'NONE'}"
+            f" (w1 min={raw_w1.min():.3f}, max={raw_w1.max():.3f})\n"
+            f"        phase2: {format(late_lo, '.1f') + '-' + format(t_[-1], '.1f') + 'h' if has_late else 'NONE'}"
+            f" (w2 min={raw_w2.min():.3f}, max={raw_w2.max():.3f})\n"
+            f"        -> {'PASS' if (has_early and has_late) else 'FAIL'}"
+        )
+        print(line)
+        summary_lines.append(line)
+
+        a = ax[0, c]
+        a.plot(t_, raw_w1, "-", color="C0", lw=1.8, label="phase1 weight (raw sigmoid)")
+        a.plot(t_, raw_w2, "-", color="C1", lw=1.8, label="phase2 weight (raw sigmoid)")
+        a.plot(t_, eff_w1, "--", color="C0", lw=1.2, alpha=.7, label="phase1 weight (effective)")
+        a.plot(t_, eff_w2, "--", color="C1", lw=1.2, alpha=.7, label="phase2 weight (effective)")
+        a.axhline(0.95, color="grey", ls=":", lw=1)
+        _mark_pivot(a, pivot_hours, blend_half_width_hours)
+        a.set_ylim(-0.05, 1.05); a.set_xlabel("time (h)"); a.set_ylabel("blend weight")
+        a.set_title(f"{tag} (batch {bidx})", fontsize=9); a.grid(alpha=.3)
+        if c == 0:
+            a.legend(fontsize=7, loc="center left")
+    fig.suptitle(f"C.0 — blend-weight sanity — pivot={pivot_hours:g}h "
+                f"+-{blend_half_width_hours:g}h — model@trial {gp_idx}")
+    fig.tight_layout()
+    _finish(fig, out_dir, "C0_blend_weight_sanity.png", show)
+    pd.DataFrame(rows).to_csv(Path(out_dir) / "C0_blend_weight_sanity.csv", index=False)
+    (Path(out_dir) / "C0_blend_weight_sanity.txt").write_text("\n\n".join(summary_lines) + "\n")
+    return fig
+
+
+def check_training_split_sanity(gp_agent, gp_idx, out_dir, pivot_hours, show=False):
+    """C.0a -- training-DATA assignment sanity check for DualPhaseModelLearning.
+
+    Separate concern from check_blend_weight_sanity (C.0), which only checks the ROLLOUT-time
+    prediction blend. This checks the actual TRAINING sets: does phase1's GP only ever see
+    early-batch transitions and phase2's only late-batch ones, with no overlap/leak?
+
+    add_data hard-splits at pivot_step (model_learning_dual_phase.py:103-111): phase1 gets
+    state_samples[:pivot_step+1], phase2 gets state_samples[pivot_step:]. The base
+    Model_learning.data_to_gp_IO (MC-PILCO/model_learning/Model_learning.py:502-506) then
+    turns an N-row state slice into (N-1) GP input rows via states[:-1] (dropping the last
+    row, which only ever serves as a TARGET, never an input) -- so the two phases' input rows
+    should be cleanly adjacent, not overlapping: phase1's last input at decision index
+    (pivot_step - 1), phase2's first input at decision index pivot_step. No shared input row,
+    unlike a naive split might suggest.
+
+    Reads the ACTUAL accumulated training inputs already loaded onto
+    gp_agent.model_learning.phase{1,2} by reconstruct_gp_agent for trial gp_idx (ground truth
+    of what those GPs were actually fit on -- not a replay), decodes each row's `time` channel
+    (STATE_NAMES.index("time") column of the [state..., action] input vector) back to physical
+    batch-hours, and reports count + [min, max] time range per phase.
+
+    The leak check is DISJOINTNESS (phase1's latest input time < phase2's earliest), not a
+    comparison against the raw `pivot_hours` float: PIVOT_STEP = round(pivot_hours /
+    T_SAMPLING) (pensim_wrapper.py) snaps the split to the nearest decision step, so the
+    actual boundary in physical time is generically a bit off nominal pivot_hours (e.g.
+    pivot_hours=95.5h with T_SAMPLING=5h rounds to step 19 -> phase1 ends at 90.2h, phase2
+    starts at 95.2h -- a clean one-T_SAMPLING-step gap, not a leak, even though 95.2 < 95.5).
+    Comparing against pivot_hours directly would misfire on every run whose pivot isn't an
+    exact multiple of T_SAMPLING."""
+    time_col = STATE_NAMES.index("time")
+    lo_t, hi_t = STATE_RANGES["time"]
+    rows = []
+    summary_lines = []
+    for name, sub in [("phase1", gp_agent.model_learning.phase1),
+                      ("phase2", gp_agent.model_learning.phase2)]:
+        gi = sub.gp_inputs.detach().cpu().numpy() if torch.is_tensor(sub.gp_inputs) else np.asarray(sub.gp_inputs)
+        t_hours = decode_state_value("time", _denorm(gi[:, time_col], lo_t, hi_t))
+        n = int(gi.shape[0])
+        t_min, t_max = float(t_hours.min()), float(t_hours.max())
+        rows.append({"phase": name, "n_points": n, "time_min_h": t_min, "time_max_h": t_max})
+
+    p1, p2 = rows[0], rows[1]
+    tol = 1e-6
+    disjoint = p1["time_max_h"] < p2["time_min_h"] - tol
+    gap_h = p2["time_min_h"] - p1["time_max_h"]
+    nominal_step = round(pivot_hours / T_SAMPLING) * T_SAMPLING
+
+    line = (
+        f"[training split sanity | model@trial {gp_idx}, pivot_hours={pivot_hours:g}h "
+        f"(rounds to step boundary ~{nominal_step:g}h)]\n"
+        f"  phase1: n={p1['n_points']} training points, time range "
+        f"[{p1['time_min_h']:.2f}, {p1['time_max_h']:.2f}]h\n"
+        f"  phase2: n={p2['n_points']} training points, time range "
+        f"[{p2['time_min_h']:.2f}, {p2['time_max_h']:.2f}]h\n"
+        f"  gap between phase1's last input and phase2's first input: {gap_h:.2f}h "
+        f"(expect ~{T_SAMPLING:g}h, one decision step -- the boundary step itself is a "
+        f"TARGET-only row for phase1 and phase2's first INPUT row, never double-counted)\n"
+        f"  -> {'PASS (disjoint, no overlap)' if disjoint else 'FAIL (data-assignment leak: ranges overlap/invert)'}"
+    )
+    print(line)
+    summary_lines.append(line)
+
+    df = pd.DataFrame(rows)
+    df.to_csv(Path(out_dir) / "C0a_training_split_sanity.csv", index=False)
+    (Path(out_dir) / "C0a_training_split_sanity.txt").write_text("\n".join(summary_lines) + "\n")
+    return df
+
+
+def check_gp_independence_sanity(gp_agent, gp_idx, out_dir, cfg, show=False):
+    """C.0b -- GP-instance independence sanity check for DualPhaseModelLearning.
+
+    Catches aliasing: phase1/phase2 are meant to be two fully independent
+    Model_learning_RBF_det_time instances (DualPhaseModelLearning.__init__:
+    self.phase1 = phase_model_cls(**phase1_par); self.phase2 = phase_model_cls(**phase2_par)
+    -- two separate constructor calls), each holding its own per-channel RBF GP with its own
+    torch.nn.Parameter tensors (Stationary_GP.__init__/RBF.__init__ in
+    MC-PILCO/gpr_lib/GP_prior/Stationary_GP.py -- log_lengthscales_par, log_lambda_par,
+    sigma_n_log). Nothing in that path shares a tensor between phases by construction, but
+    this verifies it at runtime rather than by code-reading alone:
+
+      (a) object identity      -- phase1 is not phase2; no gp_list[k] object shared.
+      (b) parameter storage    -- no phase1/phase2 parameter pair shares underlying memory
+                                   (data_ptr equality) -- catches a `.view()`/shared-buffer
+                                   bug that (a) alone would miss (still two Python objects,
+                                   but backed by the same storage).
+      (c) trained values differ -- prints lengthscales/lambda/sigma_n for both phases per
+                                   channel; flags any pair identical to machine precision
+                                   (near-impossible after independent training on different
+                                   data unless something is aliased or one side never trained).
+      (d) moved from init      -- flags any phase/channel whose trained value is still
+                                   (near-)exactly its init value -- a phase stuck at init
+                                   likely never received a real gradient update.
+      (e) gradients flow       -- runs ONE forward+backward per phase/channel (its own
+                                   forward(), the same Marginal_log_likelihood criterion real
+                                   training uses) against that phase's OWN loaded training
+                                   data, WITHOUT calling optimizer.step() (so this does not
+                                   mutate the loaded checkpoint's parameter values -- .grad is
+                                   explicitly cleared again afterward), and confirms every
+                                   trainable parameter's .grad is populated and non-zero for
+                                   BOTH phases independently."""
+    ml = gp_agent.model_learning
+    p1, p2 = ml.phase1, ml.phase2
+    n_gp = p1.num_gp
+    lines = []
+
+    # (a) object identity
+    ok_obj = p1 is not p2
+    shared_gp_objs = [k for k in range(n_gp) if p1.gp_list[k] is p2.gp_list[k]]
+    lines.append(
+        f"(a) object identity: phase1 is not phase2 -> {'PASS' if ok_obj else 'FAIL (SAME OBJECT)'}; "
+        f"shared gp_list[k] objects: {shared_gp_objs or 'none'} -> "
+        f"{'PASS' if not shared_gp_objs else 'FAIL'}")
+
+    # (b) parameter storage identity
+    shared_storage = []
+    for k in range(n_gp):
+        params1 = dict(p1.gp_list[k].named_parameters())
+        params2 = dict(p2.gp_list[k].named_parameters())
+        for name, t1 in params1.items():
+            t2 = params2.get(name)
+            if t2 is not None and t1.data_ptr() == t2.data_ptr():
+                shared_storage.append((k, name))
+    lines.append(f"(b) parameter storage: shared data_ptr pairs: {shared_storage or 'none'} -> "
+                f"{'PASS' if not shared_storage else 'FAIL (ALIASED STORAGE)'}")
+
+    # (c)/(d) trained hyperparameters: differ between phases, and moved from init
+    init_dict_1 = cfg["mc_pilco_init"]["model_learning_par"]["phase1_par"]["init_dict_list"]
+    init_dict_2 = cfg["mc_pilco_init"]["model_learning_par"]["phase2_par"]["init_dict_list"]
+    rows = []
+    identical_pairs = []
+    stuck_at_init = []
+    for k in range(n_gp):
+        name = STATE_NAMES[k] if k < len(STATE_NAMES) else f"gp{k}"
+        for tag, sub, init_dict in [("phase1", p1, init_dict_1[k]), ("phase2", p2, init_dict_2[k])]:
+            gp = sub.gp_list[k]
+            ls = np.exp(gp.log_lengthscales_par.detach().cpu().numpy())
+            lam = float(np.exp(gp.log_lambda_par.detach().cpu().numpy().ravel()[0]))
+            sn = float(np.exp(gp.sigma_n_log.detach().cpu().numpy().ravel()[0]))
+            ls_init = np.asarray(init_dict["lengthscales_init"], dtype=float)
+            lam_init = float(np.asarray(init_dict["lambda_init"]).ravel()[0])
+            sn_init = float(np.asarray(init_dict["sigma_n_init"]).ravel()[0])
+            moved = not (np.allclose(ls, ls_init, atol=1e-6, rtol=0)
+                        and np.isclose(lam, lam_init, atol=1e-6, rtol=0)
+                        and np.isclose(sn, sn_init, atol=1e-6, rtol=0))
+            if not moved:
+                stuck_at_init.append((name, tag))
+            rows.append({"channel": name, "phase": tag, "lengthscales": ls.tolist(),
+                        "lambda": lam, "sigma_n": sn, "moved_from_init": moved})
+        ls1 = np.exp(p1.gp_list[k].log_lengthscales_par.detach().cpu().numpy())
+        ls2 = np.exp(p2.gp_list[k].log_lengthscales_par.detach().cpu().numpy())
+        lam1 = float(np.exp(p1.gp_list[k].log_lambda_par.detach().cpu().numpy().ravel()[0]))
+        lam2 = float(np.exp(p2.gp_list[k].log_lambda_par.detach().cpu().numpy().ravel()[0]))
+        sn1 = float(np.exp(p1.gp_list[k].sigma_n_log.detach().cpu().numpy().ravel()[0]))
+        sn2 = float(np.exp(p2.gp_list[k].sigma_n_log.detach().cpu().numpy().ravel()[0]))
+        if np.array_equal(ls1, ls2) and lam1 == lam2 and sn1 == sn2:
+            identical_pairs.append(name)
+        print(f"  [{name}] phase1: lengthscales={np.array2string(ls1, precision=4)} "
+             f"lambda={lam1:.4g} sigma_n={sn1:.4g}")
+        print(f"  [{name}] phase2: lengthscales={np.array2string(ls2, precision=4)} "
+             f"lambda={lam2:.4g} sigma_n={sn2:.4g}")
+    lines.append(f"(c) identical-to-machine-precision phase1/phase2 pairs: "
+                f"{identical_pairs or 'none'} -> {'PASS' if not identical_pairs else 'FAIL (possible alias)'}")
+    lines.append(f"(d) stuck at init (never moved) (channel, phase) pairs: "
+                f"{stuck_at_init or 'none'} -> {'PASS' if not stuck_at_init else 'FAIL (may not have trained)'}")
+
+    # (e) gradient flow: one forward+backward per phase/channel, no optimizer.step() (does
+    # not mutate the checkpoint's parameter VALUES -- .grad is cleared again immediately after
+    # inspection). reconstruct_gp_agent leaves every GP in eval mode, which -- per
+    # GP_prior.set_eval_mode (MC-PILCO/gpr_lib/GP_prior/GP_prior.py:75-80) -- forces
+    # requires_grad=False on EVERY parameter (stashing the prior flags for set_training_mode
+    # to restore) as a safety measure for inference-only rollouts. That's not a training bug;
+    # it just means this probe must call set_training_mode() first (matching what real
+    # training actually ran under) or every parameter would trivially show "no grad" for a
+    # reason that has nothing to do with phase independence. set_eval_mode() is restored
+    # afterward so this leaves the reconstructed agent exactly as it was found.
+    criterion_cls = cfg["reinforce_par"]["model_optimization_opt_list"][0]["criterion"]
+    no_grad_flags = []
+    for tag, sub in [("phase1", p1), ("phase2", p2)]:
+        for k in range(n_gp):
+            name = STATE_NAMES[k] if k < len(STATE_NAMES) else f"gp{k}"
+            gp = sub.gp_list[k]
+            gp.set_training_mode()
+            for p in gp.parameters():
+                p.grad = None
+            X = sub.gp_inputs
+            Y = sub.gp_output_list[k] / sub.norm_list[k]
+            out = gp(X)
+            loss = criterion_cls()(out, Y)
+            loss.backward()
+            for pname, p in gp.named_parameters():
+                if not p.requires_grad:
+                    continue
+                g = p.grad
+                gmax = 0.0 if g is None else float(g.abs().max())
+                if g is None or gmax == 0.0:
+                    no_grad_flags.append((tag, name, pname))
+            for p in gp.parameters():
+                p.grad = None  # leave checkpoint's grad state as found (untouched values)
+            gp.set_eval_mode()  # restore the mode reconstruct_gp_agent left this GP in
+    lines.append(f"(e) zero/missing-gradient (phase, channel, param) triples: "
+                f"{no_grad_flags or 'none'} -> {'PASS' if not no_grad_flags else 'FAIL'}")
+
+    summary = f"[GP independence sanity | model@trial {gp_idx}]\n" + "\n".join(lines)
+    print(summary)
+
+    pd.DataFrame(rows).to_csv(Path(out_dir) / "C0b_gp_independence_sanity.csv", index=False)
+    (Path(out_dir) / "C0b_gp_independence_sanity.txt").write_text(summary + "\n")
+    return rows
+
+
+def check_rollout_gradient_flow(gp_agent, gp_idx, out_dir, N=20, show=False):
+    """C.0c -- gradient-flow-through-the-blend sanity check for DualPhaseModelLearning.
+
+    Different failure mode from check_gp_independence_sanity (C.0b), which only tested
+    gradients during MODEL fitting (train_gp_likelihood's one-GP marginal-log-likelihood
+    loss, no blend involved at all). This checks the thing POLICY optimisation actually runs:
+    a multi-step PARTICLE rollout through get_next_state (particle_pred=True, i.e. through
+    Normal.rsample() -- the reparameterization trick MC-PILCO relies on for pathwise policy
+    gradients: model_learning_det_time.py's get_next_state_from_gp_output uses `.rsample()`,
+    not `.sample()`, so sampling itself is differentiable) across MANY sequential steps,
+    through DualPhaseModelLearning.get_next_state's blend
+    (next_states = (1-w)*next1 + w*next2 -- model_learning_dual_phase.py:161-166) and its
+    EPS-skip branches (lines 156-159, which route to exactly one phase outside the blend
+    window -- not a gradient bug, just means that specific STEP's gradient can only credit
+    the phase actually evaluated there; see the printed per-phase step-coverage below).
+
+    A real reparameterization break (an accidental .detach()/.numpy()/torch.no_grad() on one
+    phase's branch, or a hard argmax-style gate instead of the smooth sigmoid) would show up
+    as exactly-zero gradient on every parameter of the affected phase, even though that phase
+    IS evaluated for a large chunk of the trajectory -- this test would catch it where C.0b
+    could not, since C.0b never invokes the blend at all.
+
+    Procedure: starting from batch gp_idx's own recorded initial state (N particles, replicated
+    like _particle_rollout), replays the RECORDED action sequence but as a single differentiable
+    leaf tensor (action_probe, requires_grad=True) standing in for "whatever produced the
+    action" (the real policy network, in actual training) -- this isolates the model/blend
+    graph's differentiability from the policy network's own, which is a separate, standard
+    nn.Module concern outside this check's scope. Both phases' GPs are temporarily switched to
+    set_training_mode() (restoring requires_grad=True on their own hyperparameters, undone by
+    reconstruct_gp_agent's set_eval_mode()) so gradient reaching THEIR parameters directly
+    localises which phase's forward computation the graph actually passed through -- a stronger
+    localisation than just checking action_probe.grad, which could stay non-zero even if only
+    one phase secretly contributed. Runs loss.backward() once on a sign-safe scalar
+    (next_states**2).sum() (avoids accidental cross-particle/dim sign cancellation to zero) and
+    reports non-None/non-zero verdicts for action_probe and every trainable parameter of both
+    phases. Restores set_eval_mode() and clears .grad afterward -- does not mutate the loaded
+    checkpoint's parameter VALUES."""
+    ml = gp_agent.model_learning
+    p1, p2 = ml.phase1, ml.phase2
+    n_gp = p1.num_gp
+    dtype, device = gp_agent.dtype, gp_agent.device
+
+    for sub in (p1, p2):
+        for gp in sub.gp_list:
+            gp.set_training_mode()
+
+    S = np.asarray(gp_agent.state_samples_history[gp_idx])
+    U = np.asarray(gp_agent.input_samples_history[gp_idx])
+    T = S.shape[0]
+    action_probe = torch.tensor(U, dtype=dtype, device=device, requires_grad=True)
+
+    torch.manual_seed(0)
+    x = torch.tensor(np.tile(S[0], (N, 1)), dtype=dtype, device=device)
+    ml.reset_step_counter(0)
+    phase1_calls, phase2_calls = 0, 0
+    for t in range(1, T):
+        w = ml._blend_weight(t - 1)
+        phase1_calls += int(w < 1.0 - _BLEND_SKIP_EPS)
+        phase2_calls += int(w > _BLEND_SKIP_EPS)
+        u = action_probe[t - 1:t, :].expand(N, -1)
+        x, _, _ = ml.get_next_state(current_state=x, current_input=u, particle_pred=True)
+    loss = (x ** 2).sum()
+    loss.backward()
+
+    lines = [
+        f"[rollout gradient-flow sanity | model@trial {gp_idx}, batch {gp_idx}, T={T} steps]",
+        f"  phase1 evaluated on {phase1_calls}/{T - 1} steps, phase2 evaluated on "
+        f"{phase2_calls}/{T - 1} steps (both > (T-1) - blend-only steps, since each phase is "
+        f"evaluated for its pure region PLUS the shared blend region, not skipped there)",
+    ]
+
+    ap_grad = action_probe.grad
+    ap_max = 0.0 if ap_grad is None else float(ap_grad.abs().max())
+    lines.append(f"  action_probe.grad: {'None' if ap_grad is None else f'max|grad|={ap_max:.3e}'} "
+                f"-> {'PASS' if ap_max > 0.0 else 'FAIL (no gradient reaches the actions at all)'}")
+
+    no_grad_flags = []
+    expected_no_grad = []
+    for tag, sub in [("phase1", p1), ("phase2", p2)]:
+        for k in range(n_gp):
+            name = STATE_NAMES[k] if k < len(STATE_NAMES) else f"gp{k}"
+            gp = sub.gp_list[k]
+            for pname, p in gp.named_parameters():
+                if not p.requires_grad:
+                    continue
+                g = p.grad
+                gmax = 0.0 if g is None else float(g.abs().max())
+                if g is None or gmax == 0.0:
+                    # DETERMINISTIC_CHANNELS (the `time` clock) has its GP's output SPLICED
+                    # OUT and replaced with an exact deterministic delta every step
+                    # (model_learning_det_time.get_next_state_from_gp_output) -- its own GP's
+                    # forward pass never influences next_states, so zero gradient there is
+                    # correct/expected for BOTH phases, not a reparameterization break.
+                    (expected_no_grad if k in DETERMINISTIC_CHANNELS else no_grad_flags).append(
+                        (tag, name, pname))
+    if expected_no_grad:
+        lines.append(f"  zero-gradient on deterministic channel(s) (expected, GP output is "
+                    f"discarded/spliced there regardless of phase): {expected_no_grad}")
+    lines.append(f"  zero/missing-gradient on NON-deterministic (phase, channel, param) triples: "
+                f"{no_grad_flags or 'none'} -> "
+                f"{'PASS (gradient reaches both phases)' if not no_grad_flags else 'FAIL (a phase is effectively frozen during rollout)'}")
+
+    # cleanup: leave the reconstructed agent's grad/mode state as we found it
+    action_probe.grad = None
+    for sub in (p1, p2):
+        for gp in sub.gp_list:
+            for p in gp.parameters():
+                p.grad = None
+            gp.set_eval_mode()
+
+    summary = "\n".join(lines)
+    print(summary)
+    (Path(out_dir) / "C0c_rollout_gradient_flow.txt").write_text(summary + "\n")
+    return no_grad_flags
+
+
+def check_train_eval_blend_consistency(gp_agent, gp_idx, run, out_dir, show=False):
+    """C.0d -- prediction-time / training-time blend consistency check.
+
+    Verifies the SAME blend function (same pivot, same half-width, same per-step weight) is
+    used identically in (i) the particle rollout POLICY OPTIMISATION drives and (ii) the
+    rollout HELD-OUT EVALUATION/PREDICTION diagnostics use -- a mismatch there would silently
+    degrade multi-phase specifically (the single-phase model has no such split to drift).
+
+    Two independent lines of evidence, not just one:
+
+    (a)/(b) VALUE check: compares gp_agent.model_learning.pivot_hours/blend_half_width_hours
+    (the values actually baked into the reconstructed model doing every computation below)
+    against run.pivot_hours/run.blend_half_width_hours (parsed straight from this run's own
+    note.txt -- see Run.pivot_hours/blend_half_width_hours, eval_multi_phase_lib.py:156-162).
+    Catches a config-reconstruction bug (e.g. a dropped kwarg in _build_cfg_kwargs) that would
+    silently evaluate with different blend parameters than the run actually trained with.
+
+    (c)/(d) STRUCTURAL check, empirical not just read from code: PenSimMCPILCOMultiPhase
+    overrides BOTH apply_policy (policy optimisation's rollout) AND rollout (the method behind
+    get_rollout_prediction_performance, hence every held-out plot in this file) to call
+    self.model_learning.reset_step_counter() before delegating to the SAME base MC_PILCO loop,
+    which calls self.model_learning.get_next_state(...) -- see pensim_wrapper.py's
+    PenSimMCPILCOMultiPhase docstring and its apply_policy/rollout overrides. Structurally
+    there is exactly one blend implementation (DualPhaseModelLearning._blend_weight) and no
+    parallel reimplementation exists for evaluation. This step verifies that guarantee
+    empirically: instruments _blend_weight to record every (decision_step, weight) pair it
+    computes, once while replaying batch gp_idx via a hand-rolled policy-optimisation-SHAPED
+    loop (reset + sequential get_next_state, matching apply_policy's own loop shape) and once
+    via gp_agent.rollout(data_collection_index=gp_idx, ...) itself (the actual method every
+    held-out evaluation diagnostic here calls), then checks the two recorded sequences are
+    identical step-for-step. particle_pred=False (deterministic mean rollout) in both, so this
+    isolates blend-routing consistency from any RNG-driven sampling variation."""
+    ml = gp_agent.model_learning
+    lines = []
+
+    pivot_match = abs(ml.pivot_hours - run.pivot_hours) < 1e-9
+    width_match = abs(ml.blend_half_width_hours - run.blend_half_width_hours) < 1e-9
+    lines.append(f"(a) reconstructed model pivot_hours={ml.pivot_hours:g}h vs run.pivot_hours "
+                f"(note.txt)={run.pivot_hours:g}h -> {'PASS' if pivot_match else 'FAIL (MISMATCH)'}")
+    lines.append(f"(b) reconstructed model blend_half_width_hours={ml.blend_half_width_hours:g}h "
+                f"vs run.blend_half_width_hours (note.txt)={run.blend_half_width_hours:g}h -> "
+                f"{'PASS' if width_match else 'FAIL (MISMATCH)'}")
+
+    calls = []
+    orig_blend_weight = ml._blend_weight
+
+    def _recording_blend_weight(t_step):
+        w = orig_blend_weight(t_step)
+        calls.append((t_step, w))
+        return w
+
+    S = np.asarray(gp_agent.state_samples_history[gp_idx])
+    U = np.asarray(gp_agent.input_samples_history[gp_idx])
+    T = S.shape[0]
+
+    ml._blend_weight = _recording_blend_weight
+    try:
+        # (i) policy-optimisation-SHAPED loop: reset + sequential get_next_state, matching
+        # apply_policy's own particle-rollout loop shape (see PenSimMCPILCOMultiPhase docstring).
+        x = torch.tensor(S[0:1], dtype=gp_agent.dtype, device=gp_agent.device)
+        ml.reset_step_counter(0)
+        calls.clear()
+        with torch.no_grad():
+            for t in range(1, T):
+                u = torch.tensor(U[t - 1:t], dtype=gp_agent.dtype, device=gp_agent.device)
+                x, _, _ = ml.get_next_state(current_state=x, current_input=u, particle_pred=False)
+        w_policy_style = list(calls)
+
+        # (ii) the ACTUAL agent.rollout() method behind get_rollout_prediction_performance --
+        # i.e. every held-out/prediction diagnostic in this file.
+        calls.clear()
+        with torch.no_grad():
+            gp_agent.rollout(data_collection_index=gp_idx, particle_pred=False)
+        w_eval_style = list(calls)
+    finally:
+        ml._blend_weight = orig_blend_weight
+
+    same_len = len(w_policy_style) == len(w_eval_style)
+    identical = same_len and w_policy_style == w_eval_style
+    lines.append(f"(c) weight-sequence length: policy-opt-shaped loop={len(w_policy_style)} calls, "
+                f"agent.rollout()={len(w_eval_style)} calls -> {'PASS' if same_len else 'FAIL'}")
+    if same_len and not identical:
+        mismatches = [(a, b) for a, b in zip(w_policy_style, w_eval_style) if a != b]
+        lines.append(f"(d) per-step (decision_step, weight) pairs identical -> FAIL, "
+                    f"{len(mismatches)}/{len(w_policy_style)} mismatches, first: {mismatches[0]}")
+    else:
+        lines.append(f"(d) per-step (decision_step, weight) pairs identical, bit-for-bit -> "
+                    f"{'PASS' if identical else 'FAIL'}")
+
+    ok = pivot_match and width_match and identical
+    summary = (f"[train/eval blend consistency | model@trial {gp_idx}, batch {gp_idx}]\n"
+              + "\n".join(lines) + f"\n  -> OVERALL: {'PASS' if ok else 'FAIL'}")
+    print(summary)
+    (Path(out_dir) / "C0d_train_eval_blend_consistency.txt").write_text(summary + "\n")
+    return ok
+
+
+def check_active_dims_consistency(gp_agent, run, single_phase_get_config_fn, out_dir, show=False):
+    """C.0e -- active_dims / state-layout consistency check: phase1 vs phase2 vs the matching
+    single-phase baseline.
+
+    Given STATE_NAMES = ["Wt", "X", "P", "Viscosity", "time"], each of the num_gp per-channel
+    GPs reads the SAME shared `active_dims` (a fixed subset of the [state..., action] input
+    columns -- see config_dual_phase.py's init_dict_RBF, reused for every gp_index), and
+    gp_list[k] is BY CONSTRUCTION the GP that predicts STATE_NAMES[k]'s delta (data_to_gp_output
+    in MC-PILCO/model_learning/Model_learning.py:495-500 builds targets via
+    `states[1:,i]-states[:-1,i]) for i in range(dim_state)` -- index i IS the channel index, no
+    relabelling possible). An "off-by-one" bug here would mean some gp_index's active_dims (or
+    which physical channel it targets) has silently drifted between phase1, phase2, and/or the
+    single-phase config it's meant to match -- e.g. one phase accidentally excluding a different
+    channel from its regressors, or the two ablation families (time-dropped vs time-kept)
+    disagreeing about which config family a run actually belongs to.
+
+    single_phase_get_config_fn's kwargs are filtered from run.params via inspect.signature (not
+    hardcoded) since single-phase and dual-phase get_config accept different kwarg sets (e.g.
+    single-phase has no pivot_hours/blend_half_width_hours) -- this only needs the CONFIG
+    (init_dict_list is fixed at config-build time, identical across every trial), not a trained
+    agent, so no single-phase run needs to have ever actually been trained for this check to run."""
+    import inspect
+
+    ml = gp_agent.model_learning
+    p1, p2 = ml.phase1, ml.phase2
+    n_gp = p1.num_gp
+
+    accepted = set(inspect.signature(single_phase_get_config_fn).parameters)
+    sp_kwargs = {k: v for k, v in run.params.items() if k in accepted}
+    sp_cfg = single_phase_get_config_fn(**sp_kwargs)
+    sp_init_dict_list = sp_cfg["mc_pilco_init"]["model_learning_par"]["init_dict_list"]
+
+    lines = ["[active_dims / state-layout consistency]"]
+    time_idx = STATE_NAMES.index("time")
+    lines.append(f"STATE_NAMES={STATE_NAMES}, TIME_IDX={time_idx}, "
+                f"DETERMINISTIC_CHANNELS keys={list(DETERMINISTIC_CHANNELS.keys())} -> "
+                f"{'PASS' if list(DETERMINISTIC_CHANNELS.keys()) == [time_idx] else 'FAIL (TIME_IDX mismatch)'}")
+    lines.append(f"num_gp: phase1={p1.num_gp}, phase2={p2.num_gp}, single_phase={len(sp_init_dict_list)}, "
+                f"STATE_DIM={STATE_DIM} -> "
+                f"{'PASS' if p1.num_gp == p2.num_gp == len(sp_init_dict_list) == STATE_DIM else 'FAIL'}")
+
+    rows = []
+    mismatched_channels = []
+    for k in range(n_gp):
+        name = STATE_NAMES[k] if k < len(STATE_NAMES) else f"gp{k}"
+        ad1 = p1.gp_list[k].active_dims.cpu().numpy().tolist()
+        ad2 = p2.gp_list[k].active_dims.cpu().numpy().tolist()
+        ad_sp = np.asarray(sp_init_dict_list[k]["active_dims"]).tolist()
+        row_ok = (ad1 == ad2 == ad_sp)
+        rows.append({"channel": name, "gp_index": k, "phase1_active_dims": ad1,
+                    "phase2_active_dims": ad2, "single_phase_active_dims": ad_sp,
+                    "all_match": row_ok})
+        line = (f"  [gp_index={k} / {name}] phase1={ad1}  phase2={ad2}  "
+               f"single_phase={ad_sp}  -> {'PASS' if row_ok else 'FAIL'}")
+        print(line)
+        lines.append(line)
+        if not row_ok:
+            mismatched_channels.append(name)
+
+    time_present_1 = time_idx in p1.gp_list[0].active_dims.cpu().numpy().tolist()
+    time_present_2 = time_idx in p2.gp_list[0].active_dims.cpu().numpy().tolist()
+    time_present_sp = time_idx in np.asarray(sp_init_dict_list[0]["active_dims"]).tolist()
+    lines.append(f"`time` (idx {time_idx}) present as a GP INPUT regressor: phase1={time_present_1}, "
+                f"phase2={time_present_2}, single_phase={time_present_sp} -> "
+                f"{'PASS (all agree)' if time_present_1 == time_present_2 == time_present_sp else 'FAIL (ablation family mismatch)'}")
+
+    ok = (not mismatched_channels) and (time_present_1 == time_present_2 == time_present_sp) \
+        and (p1.num_gp == p2.num_gp == len(sp_init_dict_list) == STATE_DIM) \
+        and (list(DETERMINISTIC_CHANNELS.keys()) == [time_idx])
+    lines.append(f"-> OVERALL: {'PASS' if ok else f'FAIL (mismatched channels: {mismatched_channels})'}")
+
+    summary = "\n".join(lines)
+    for l in lines:
+        if not l.startswith("  [gp_index"):  # already printed inside the loop above
+            print(l)
+    pd.DataFrame(rows).to_csv(Path(out_dir) / "C0e_active_dims_consistency.csv", index=False)
+    (Path(out_dir) / "C0e_active_dims_consistency.txt").write_text(summary + "\n")
+    return ok
 
 
 def _kstep_errors(agent, batch_idx, horizons, target_origins=60):

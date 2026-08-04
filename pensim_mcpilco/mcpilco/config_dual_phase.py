@@ -11,7 +11,9 @@ sys.path.insert(0, str(REPO_ROOT / "MC-PILCO"))
 import gpr_lib.Likelihood.Gaussian_likelihood as Likelihood
 import policy_learning.Policy as Policy
 
-from mcpilco.penicillin_cost import PeniConcentrationCost, PeniConcentrationDenseCost, PeniMassChangeCost
+from mcpilco.penicillin_cost import (PeniConcentrationCost, PeniConcentrationDenseCost,
+                                     PeniConcentrationChangeCost, PeniMassTerminalCost,
+                                     PeniMassChangeCost)
 
 from mcpilco.model_learning_dual_phase import DualPhaseModelLearning
 from mcpilco.pensim_wrapper import (STATE_DIM,
@@ -25,6 +27,22 @@ from mcpilco.pensim_wrapper import (STATE_DIM,
                                     initial_state_norm,
                                     initial_state_var_norm)
 
+# Selectable via get_config(cost_function=<name>) -- e.g. from the experiment drivers'
+# --cost_function CLI flag. All five share PeniConcentrationCost's __init__ signature (only
+# _terms differs), so any name here is a drop-in swap for cost_function_par below.
+COST_FUNCTIONS = {cls.__name__: cls for cls in (
+    PeniConcentrationCost, PeniConcentrationDenseCost, PeniConcentrationChangeCost,
+    PeniMassTerminalCost, PeniMassChangeCost,
+)}
+
+
+def _resolve_cost_function(cost_function, default):
+    if cost_function is None:
+        return default
+    if isinstance(cost_function, str):
+        return COST_FUNCTIONS[cost_function]
+    return cost_function
+
 
 # Two independent, mutually-exclusive ways to delay Viscosity (see PenSimWrapper.__init__,
 # which raises if both are set): use_offline_measurements=True for the simple "delayed
@@ -34,7 +52,8 @@ from mcpilco.pensim_wrapper import (STATE_DIM,
 def get_config(seed=1, num_trials=10, fast=False, dtype=torch.float64, device=torch.device("cuda" if torch.cuda.is_available() else "cpu"),
                pivot_hours=PIVOT_HOURS, blend_half_width_hours=BLEND_HALF_WIDTH_HOURS,
                risk_weight=0.0, visc_penalty=0.02, harvest_reward=True, constraint_strength=0.75,
-               pms_visc_delay=False, use_offline_measurements=False):
+               pms_visc_delay=False, use_offline_measurements=False, cost_function=None,
+               num_explorations=None):
     """Dual-phase config: same policy/cost/exploration as config_single_phase.get_config, but
     f_model_learning is DualPhaseModelLearning -- two independent Model_learning_RBF_det_time
     instances, each with the SAME per-channel init as the single-phase model, fit on disjoint
@@ -52,7 +71,7 @@ def get_config(seed=1, num_trials=10, fast=False, dtype=torch.float64, device=to
 
     pivot_step = int(round(pivot_hours / T_SAMPLING))
 
-    num_explorations = 5
+    num_explorations = 5 if num_explorations is None else num_explorations
 
     n_particles = 20 if fast else 400
     n_opt_steps = 150 if fast else 1000
@@ -133,7 +152,7 @@ def get_config(seed=1, num_trials=10, fast=False, dtype=torch.float64, device=to
         "rand_exploration_policy_par": rand_exploration_policy_par,
         "f_control_policy": Policy.Sum_of_gaussians,
         "control_policy_par": control_policy_par,
-        "f_cost_function": PeniMassChangeCost,
+        "f_cost_function": _resolve_cost_function(cost_function, PeniMassChangeCost),
         # "f_cost_function": PeniConcentrationDenseCost,
         "cost_function_par": {"p_weight": 0.05, "soft_penalty": 0.05, "rate_penalty": 0.02,
                               "risk_weight": risk_weight, "visc_penalty": visc_penalty,

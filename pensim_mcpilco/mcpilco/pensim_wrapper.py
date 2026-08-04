@@ -135,6 +135,36 @@ TIME_DELTA_NORM = 2.0 * T_SAMPLING / (_t_hi - _t_lo)
 TIME_INIT_VAR = 1e-6
 
 
+def set_t_sampling(new_t_sampling):
+    """Override T_SAMPLING for the rest of this process, recomputing every module constant
+    derived from it: STEPS_PER_DECISION (PenSimWrapper.rollout's underlying-ODE-step multiplier
+    -- see its own `spd = STEPS_PER_DECISION` line, which is NOT re-derived from the `dt` the
+    caller passes in, so leaving it stale desyncs the simulator's decision cadence from what the
+    agent thinks T_sampling is), PIVOT_STEP (informational only -- config_dual_phase.get_config
+    recomputes its own pivot_step from pivot_hours/T_SAMPLING rather than reading this), and
+    TIME_DELTA_NORM (the deterministic `time` channel's fixed per-decision delta -- see
+    model_learning_det_time.DETERMINISTIC_CHANNELS).
+
+    MUST be called before config_single_phase[_baseline[_time]] / config_dual_phase[_baseline
+    [_time]] (or anything else that does `from mcpilco.pensim_wrapper import T_SAMPLING` /
+    `TIME_DELTA_NORM` / etc.) is imported for the FIRST TIME in this process -- `from X import Y`
+    snapshots Y's value at that moment, so importing one of those modules first and calling this
+    after leaves them silently using the stale default. See the four
+    experiments/0{2,3}_mcpilco_*_baseline*.py drivers' --t_sampling handling: they defer their
+    `from mcpilco.config_... import get_config` import to happen after this call.
+
+    Only the FIRST call in a given process is guaranteed correct for downstream modules that
+    haven't been imported yet; a second call with a DIFFERENT value won't retroactively fix
+    modules already imported (and hence already cached) with the first value. Irrelevant for the
+    normal CLI use case (one process per run) -- only matters if calling this repeatedly with
+    different values inside one long-lived Python session (e.g. a notebook)."""
+    global T_SAMPLING, STEPS_PER_DECISION, PIVOT_STEP, TIME_DELTA_NORM
+    T_SAMPLING = new_t_sampling
+    STEPS_PER_DECISION = int(round(T_SAMPLING / STEP_IN_HOURS))
+    PIVOT_STEP = int(round(PIVOT_HOURS / T_SAMPLING))
+    TIME_DELTA_NORM = 2.0 * T_SAMPLING / (_t_hi - _t_lo)
+
+
 INIT_STATE_PHYS = {"T": 297.98, "DO2": 12.33, "O2": 0.189, "CO2outgas": 1.86,
                    "pH": 6.49, "Wt": 97907.0, "PAA": 1200.0, "X": 22.80, "P": 16.73,
                    "time": WARMUP_H}
@@ -602,23 +632,6 @@ class PenSimMCPILCO(MCP.MC_PILCO):
             initial_state, np_policy, T_exploration, self.T_sampling,
             self.std_meas_noise
         )
-
-        # if not flg_exploration:
-        #     break
-            # y = batch_yield_kg(self.system.monitor[-1])
-            # if y >= FAILED_YIELD_KG:
-            #     if attempt > 1:
-            #         print(f"[exploration] accepted on attempt {attempt} (yield {y:.0f} kg)")
-            #     break
-            # if attempt == MAX_EXPLORATION_RETRIES:
-            #     print(f"[exploration] WARNING: no batch cleared {FAILED_YIELD_KG:.0f} kg in "
-            #         f"{MAX_EXPLORATION_RETRIES} attempts; keeping the last (yield {y:.0f} kg)")
-            #     break
-            # Rejected -> drop its monitor entry too, so `system.monitor` stays index-aligned with
-            # the kept *_samples_history (diagnostics pair the two by episode index).
-            # self.system.monitor.pop()
-            # print(f"[exploration] rejected batch (yield {y:.0f} kg < {FAILED_YIELD_KG:.0f} kg), "
-            #     f"attempt {attempt}/{MAX_EXPLORATION_RETRIES}; re-rolling")
 
         self.state_samples_history.append(states)
         self.input_samples_history.append(inputs)

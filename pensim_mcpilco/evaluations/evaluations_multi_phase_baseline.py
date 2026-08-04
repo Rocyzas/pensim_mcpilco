@@ -28,6 +28,7 @@ if _ROOT not in _sys.path:
 
 import evaluations.eval_multi_phase_lib as lib
 from mcpilco.config_dual_phase_baseline import get_config as baseline_get_config
+from mcpilco.config_single_phase_baseline import get_config as single_phase_baseline_get_config
 
 BASELINE_RESULTS_ROOT = Path(_ROOT) / "results" / "dual_phase_baseline"
 
@@ -65,6 +66,14 @@ def main(run_id, gp_trial=None, n_eval_seeds=5, eval_base=700000, compare_seed=N
     ho_idx = gp_idx + 1
     has_ho = ho_idx < len(gp_agent.state_samples_history)
     print(f"reconstructed GP model @ trial {gp_idx} | has held-out batch: {has_ho}")
+
+    lib.check_blend_weight_sanity(gp_agent, gp_idx, ho_idx, has_ho, out_dir, run.pivot_hours,
+                                  blend_half_width_hours=run.blend_half_width_hours, show=False)
+    lib.check_training_split_sanity(gp_agent, gp_idx, out_dir, run.pivot_hours, show=False)
+    lib.check_gp_independence_sanity(gp_agent, gp_idx, out_dir, run.cfg, show=False)
+    lib.check_rollout_gradient_flow(gp_agent, gp_idx, out_dir, show=False)
+    lib.check_train_eval_blend_consistency(gp_agent, gp_idx, run, out_dir, show=False)
+    lib.check_active_dims_consistency(gp_agent, run, single_phase_baseline_get_config, out_dir, show=False)
 
     per_dim_mse, one_step_results = lib.one_step_fit(gp_agent, gp_idx, out_dir, show=False)
     lib.plot_multistep_rollout(gp_agent, gp_idx, ho_idx, has_ho, out_dir, run.pivot_hours,

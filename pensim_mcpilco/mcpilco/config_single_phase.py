@@ -13,7 +13,9 @@ import gpr_lib.Likelihood.Gaussian_likelihood as Likelihood
 import model_learning.Model_learning as ML
 import policy_learning.Policy as Policy
 
-from mcpilco.penicillin_cost import PeniConcentrationCost, PeniConcentrationDenseCost, PeniMassChangeCost
+from mcpilco.penicillin_cost import (PeniConcentrationCost, PeniConcentrationDenseCost,
+                                     PeniConcentrationChangeCost, PeniMassTerminalCost,
+                                     PeniMassChangeCost)
 
 # CHANGED_THIS
 from mcpilco.model_learning_det_time import Model_learning_RBF_det_time
@@ -26,6 +28,22 @@ from mcpilco.pensim_wrapper import (STATE_DIM,
                                     initial_state_norm,
                                     initial_state_var_norm)
 
+# Selectable via get_config(cost_function=<name>) -- e.g. from the experiment drivers'
+# --cost_function CLI flag. All five share PeniConcentrationCost's __init__ signature (only
+# _terms differs), so any name here is a drop-in swap for cost_function_par below.
+COST_FUNCTIONS = {cls.__name__: cls for cls in (
+    PeniConcentrationCost, PeniConcentrationDenseCost, PeniConcentrationChangeCost,
+    PeniMassTerminalCost, PeniMassChangeCost,
+)}
+
+
+def _resolve_cost_function(cost_function, default):
+    if cost_function is None:
+        return default
+    if isinstance(cost_function, str):
+        return COST_FUNCTIONS[cost_function]
+    return cost_function
+
 
 # Two independent, mutually-exclusive ways to delay Viscosity (see PenSimWrapper.__init__,
 # which raises if both are set): use_offline_measurements=True for the simple "delayed
@@ -36,11 +54,11 @@ def get_config(seed=1, num_trials=10, fast=False, dtype=torch.float64, device=to
                optim_horizon_steps=None, num_anchor_batches=0, num_anchors=12, anchor_var=0.01,
                risk_weight=0.0, visc_penalty=0.02, harvest_reward=True, constraint_strength=0.75,
                num_high_feed_probes=0, high_feed_levels=(0.6, 0.8, 1.0), pms_visc_delay=False,
-               use_offline_measurements=False):
+               use_offline_measurements=False, cost_function=None, num_explorations=None):
     torch.manual_seed(seed)
     np.random.seed(seed)
 
-    num_explorations = 5
+    num_explorations = 5 if num_explorations is None else num_explorations
 
     n_particles = 20 if fast else 400
     n_opt_steps = 150 if fast else 1000
@@ -121,8 +139,8 @@ def get_config(seed=1, num_trials=10, fast=False, dtype=torch.float64, device=to
         "rand_exploration_policy_par": rand_exploration_policy_par,
         "f_control_policy": Policy.Sum_of_gaussians,
         "control_policy_par": control_policy_par,
-        # "f_cost_function": PeniConcentrationDenseCost,
-        'f_cost_function': PeniMassChangeCost,
+        "f_cost_function": _resolve_cost_function(cost_function, PeniConcentrationDenseCost),
+        # 'f_cost_function': PeniMassChangeCost,
 
         # Every penalty below is priced in kg-of-penicillin-equivalent BEFORE its lambda is
         # applied (see mcpilco/penicillin_cost.py's module/class docstrings), so these numbers are
