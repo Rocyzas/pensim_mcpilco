@@ -169,6 +169,19 @@ Singlephase seed3_39 and multiphase seed3_6
 Infering offline viscosity using MC-PILCO4PMS
 Singlephase seed3_40 and multiphase seed3_7
 
+--------FIXING THE ISSUE ----
+All observable on singl and multi
+seed7_1 and seed8_1 (both single and multi)
+now fixed the blend, running single on seed7_2.
+also running the cost fix seed7_3
+
+
+single phase seed7_4 is the baseline with the V and W prior kernel mean removed.
+
+
+
+BASELINE I AM GOING WITH: no time, no priors, log encoding, no DO2.
+seed7_6 in the single_phase_baseline (I can always train it on more episodes).
 
 
 seed3_103 = seed3_104 - MassFunc, T=2, no probs

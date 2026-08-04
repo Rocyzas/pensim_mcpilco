@@ -1,8 +1,17 @@
 """
-PYTHONPATH=.. python evaluations/action_sensitivity.py seed3_104
+PYTHONPATH=.. python evaluations/action_sensitivity_baseline_time.py seed0_1
 
-Takes only a run id (resolved under results/single_phase/, or a full/relative path) --
-seed/num_trials/fast and the trained GPs are read back from that run's own
+Same diagnostic as action_sensitivity.py, but for config_single_phase_baseline_time runs (plain
+RBF on every channel, WITH time kept as a GP input regressor -- see
+config_single_phase_baseline_time.py / model_learning_baseline.py). Only load_agent differs: it
+resolves run_id under results/single_phase_baseline_time/ and reconstructs the GP model via
+config_single_phase_baseline_time.get_config -- using config_single_phase.get_config or
+config_single_phase_baseline.get_config here would silently rebuild the wrong architecture (their
+parameter sets can overlap enough that load_state_dict succeeds without error -- see
+eval_single_phase_lib.reconstruct_gp_agent's docstring).
+
+Takes only a run id (resolved under results/single_phase_baseline_time/, or a full/relative
+path) -- seed/num_trials/fast and the trained GPs are read back from that run's own
 note.txt/log.pkl via eval_single_phase_lib.load_run/reconstruct_gp_agent.
 """
 import os
@@ -10,6 +19,7 @@ os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
 
 import argparse
 import csv
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -24,8 +34,11 @@ if _os.path.dirname(_ROOT) not in _sys.path:
     _sys.path.insert(0, _os.path.dirname(_ROOT))
 
 import evaluations.eval_single_phase_lib as lib
+from mcpilco.config_single_phase_baseline_time import get_config as baseline_time_get_config
 from mcpilco.pensim_wrapper import (PenSimWrapper, STATE_NAMES, STATE_DIM, ACTION_DIM,
                                     CONTROL_H, T_SAMPLING, TIME_IDX)
+
+BASELINE_TIME_RESULTS_ROOT = Path(_ROOT) / "results" / "single_phase_baseline_time"
 
 CHANNELS = [c for c in STATE_NAMES if c != "time"]
 CHANNEL_IDX = [STATE_NAMES.index(c) for c in CHANNELS]
@@ -41,21 +54,21 @@ J_GRID_SHARED = [2, 8, 15, 22, 30, 38, 44]
 
 
 def load_agent(run_id, trial):
-    """Resolves run_id under results/single_phase/ (or as a full/relative path), reads
-    seed/num_trials/fast back from that run's own note.txt, and reconstructs the trained GP
-    model from log.pkl -- no more separately hand-typing SEED/NUM_TRIALS/FAST."""
-    run = lib.load_run(run_id)
-    agent, idx = lib.reconstruct_gp_agent(run, idx=trial)
+    """Resolves run_id under results/single_phase_baseline_time/ (or as a full/relative path),
+    reads seed/num_trials/fast back from that run's own note.txt, and reconstructs the trained GP
+    model from log.pkl via config_single_phase_baseline_time.get_config -- no more separately
+    hand-typing SEED/NUM_TRIALS/FAST."""
+    run = lib.load_run(run_id, get_config_fn=baseline_time_get_config, results_root=BASELINE_TIME_RESULTS_ROOT)
+    agent, idx = lib.reconstruct_gp_agent(run, idx=trial, get_config_fn=baseline_time_get_config)
     print(f"[load_agent] {run.dir} trial {idx}")
     return agent, run, idx
 
 
 def lengthscale_report(agent):
     """Per-GP lengthscales, named by looking up each GP's OWN `active_dims` rather than
-    assuming every GP shares the same (STATE_DIM + ACTION_DIM)-length input: the Viscosity GP
-    drops `time` from its active_dims (see model_learning_det_time.VISC_ACTIVE_DIMS), so its
-    lengthscale array is one entry shorter and "action" sits at a different LOCAL position than
-    for every other GP.
+    assuming every GP shares the same (STATE_DIM + ACTION_DIM)-length input -- kept generic
+    even though every channel in this baseline uses the same (full, time-included) active_dims,
+    so this stays a drop-in match for action_sensitivity.py's reports/plots.
 
     Reports action_ls_ratio = action_lengthscale / geomean(that GP's OTHER lengthscales) instead
     of a hardcoded absolute threshold: a fixed cutoff (e.g. >= 2.0) turned out to be true for
@@ -548,8 +561,8 @@ def main(run_id, trial=None):
 if __name__ == "__main__":
     p = argparse.ArgumentParser()
     p.add_argument("run_id", type=str,
-                   help="run to evaluate, e.g. 'seed3_104' (resolved under results/single_phase/) "
-                        "or a full/relative path to a run folder")
+                   help="run to evaluate, e.g. 'seed0_1' (resolved under "
+                        "results/single_phase_baseline_time/) or a full/relative path to a run folder")
     p.add_argument("--trial", type=int, default=None,
                    help="which trial's GP model to diagnose (default: last saved)")
     args = p.parse_args()

@@ -45,6 +45,20 @@ def yield_kg(mon, strict=False):
     return net + harvest
 
 
+def feasibility_gated_yield_kg(mon):
+    """yield_kg(mon), zeroed if the batch breached the operating envelope (Wt overflow or
+    viscosity collapse). An envelope-breaching batch is operationally rejected -- it contributes
+    no usable product -- so this, not raw yield_kg, is the metric training progress should be
+    judged on: raw yield can look better while quietly trading away feasibility (see
+    evaluations/cost_reward_hacking_bo_results.md, whose own envelope-valid-yield check uses the
+    same VISC_MAX/WT_OVERFLOW breach definition inline; this is that same check factored out so
+    the training-progression plots use it too, not just the offline BO probe). Reuses
+    constraint_diagnostics's breach flags rather than re-deriving them, so there is exactly one
+    definition of "breached" for both metrics to agree on."""
+    d = constraint_diagnostics(mon)
+    return 0.0 if (d["wt_overflow"] or d["visc_exceed"]) else yield_kg(mon)
+
+
 def constraint_diagnostics(mon):
     """Per-batch constraint summary from a monitor dict (keys t/PAA/Viscosity/Wt/P/Fpaa)."""
     PAA = np.asarray(mon["PAA"])

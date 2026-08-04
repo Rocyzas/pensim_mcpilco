@@ -62,7 +62,7 @@ from mcpilco.pensim_wrapper import (
     STATE_RANGES, decode_state_value, T_SAMPLING, CONTROL_H, K_WARM, VISC_MAX, WARMUP_H,
     PAA_BAND, FS_SCALE, FPAA_MIN, FPAA_MAX,
 )
-from experiments.eval_utils import yield_kg, constraint_diagnostics
+from experiments.eval_utils import yield_kg, feasibility_gated_yield_kg, constraint_diagnostics
 
 X_IDX = STATE_NAMES.index("X")
 P_IDX = STATE_NAMES.index("P")
@@ -81,20 +81,37 @@ MODEL_STYLE = dict(color="C0", lw=2.0, zorder=5)
 # _write_note() in experiments/03_mcpilco_dual_phase.py). Anything else written there
 # (out_dir) isn't a get_config kwarg and is dropped when building cfg.
 _GET_CONFIG_KEYS = ("seed", "num_trials", "fast", "pivot_hours", "blend_half_width_hours",
-                    "risk_weight", "visc_penalty", "constraint_strength", "harvest_reward")
+                    "risk_weight", "visc_penalty", "constraint_strength", "harvest_reward",
+                    "pms_visc_delay", "use_offline_measurements")
+
+
+def _build_cfg_kwargs(params):
+    """Filter note.txt's params down to get_config kwargs. Mirrors
+    eval_single_phase_lib._build_cfg_kwargs -- see its docstring for why the two
+    Viscosity-delay flags need an explicit setdefault rather than falling through to
+    get_config's own default: both predate these keys existing in note.txt at all, so a
+    run written before they were added has no such line, and absent MUST mean "trained
+    before this feature existed" (plain online Viscosity), not whatever get_config's
+    default happens to be at reconstruction time."""
+    out = {k: v for k, v in params.items() if k in _GET_CONFIG_KEYS}
+    out.setdefault("pms_visc_delay", False)
+    out.setdefault("use_offline_measurements", False)
+    return out
 
 
 # ---------------------------------------------------------------------------
 # Run loading
 # ---------------------------------------------------------------------------
 
-def resolve_run_dir(run_id_or_path):
-    """Accepts a bare run name ("seed3_1") resolved under RESULTS_ROOT, or an existing
-    absolute/relative path directly."""
+def resolve_run_dir(run_id_or_path, results_root=None):
+    """Accepts a bare run name ("seed3_1") resolved under RESULTS_ROOT (or `results_root`, for
+    a sibling results tree such as dual_phase_baseline's), or an existing absolute/relative
+    path directly."""
+    root = RESULTS_ROOT if results_root is None else Path(results_root)
     p = Path(run_id_or_path)
     if p.exists():
         return p
-    candidate = RESULTS_ROOT / run_id_or_path
+    candidate = root / run_id_or_path
     if candidate.exists():
         return candidate
     raise FileNotFoundError(f"no run at {run_id_or_path!r} or {candidate}")
@@ -202,17 +219,23 @@ def _resolve_trial(log, trial):
     return trial
 
 
-def load_run(run_id_or_path):
+def load_run(run_id_or_path, get_config_fn=None, results_root=None):
     """The one function both entry points call first. Resolves the dir, parses note.txt,
     rebuilds cfg via get_config(**params), loads log.pkl/monitor.pkl, checks state-dim
-    compatibility."""
-    run_dir = resolve_run_dir(run_id_or_path)
+    compatibility.
+
+    get_config_fn/results_root default to this module's own config_dual_phase.get_config /
+    RESULTS_ROOT (regular runs); pass config_dual_phase_baseline's get_config and its
+    results/dual_phase_baseline root to load a plain-RBF ablation run instead -- see
+    action_sensitivity_multi_phase_baseline.py / evaluations_multi_phase_baseline.py."""
+    get_config_fn = get_config if get_config_fn is None else get_config_fn
+    run_dir = resolve_run_dir(run_id_or_path, results_root=results_root)
     note_path = run_dir / "note.txt"
     if not note_path.exists():
         raise FileNotFoundError(f"{run_dir}: no note.txt (needed to recover run params)")
     all_params = parse_run_params(note_path)
-    cfg_kwargs = {k: v for k, v in all_params.items() if k in _GET_CONFIG_KEYS}
-    cfg = get_config(**cfg_kwargs)
+    cfg_kwargs = _build_cfg_kwargs(all_params)
+    cfg = get_config_fn(**cfg_kwargs)
 
     log_path = run_dir / "log.pkl"
     if not log_path.exists():
@@ -348,10 +371,12 @@ def build_policy_agent(run):
     ref = {k: (np.asarray(base_mon["t"]), np.asarray(base_mon[k]))
           for k in ("P", "PAA", "Viscosity", "Fpaa", "Wt", "Fs")}
     ref["yield"] = yield_kg(base_mon)
+    ref["yield_gated"] = feasibility_gated_yield_kg(base_mon)
     ref["final_P"] = float(base_mon["P"][-1])
     ref_lbl = f"recipe (seed {run.train_seed})"
     print(f"loaded trial {run.n_trials_in_log} policy | recipe baseline on seed {run.train_seed}: "
-         f"final_P={ref['final_P']:.2f} g/L, yield={ref['yield']:.1f} kg")
+         f"final_P={ref['final_P']:.2f} g/L, yield={ref['yield']:.1f} kg "
+         f"(feasibility-gated: {ref['yield_gated']:.1f} kg)")
     return policy_agent, eval_wrapper, np_policy, ref, ref_lbl
 
 
@@ -626,7 +651,7 @@ def plot_training_progression(run, ref, ref_lbl, out_dir, show=False):
     ax[0, 0].plot(np.arange(len(finals)), finals, marker="o", label=f"seed {run.train_seed}")
     ax[0, 0].axhline(ref["final_P"], label=ref_lbl, **REF_STYLE)
 
-    yields = []
+    yields, yields_gated = [], []
     for i, m in enumerate(monitors):
         c = _ep_color(i, n_ep, n_expl)
         ax[0, 1].plot(m["t"], m["PAA"], color=c, lw=1, alpha=.85)
@@ -634,9 +659,21 @@ def plot_training_progression(run, ref, ref_lbl, out_dir, show=False):
         ax[1, 0].plot(m["t"], m["Fpaa"], color=c, lw=1, alpha=.85)
         ax[1, 1].plot(m["t"], m["P"], color=c, lw=1, alpha=.85)
         yields.append(yield_kg(m))
+        yields_gated.append(feasibility_gated_yield_kg(m))
     yields = np.array(yields)
-    ax[1, 2].bar(np.arange(n_ep), yields, color=[_ep_color(i, n_ep, n_expl) for i in range(n_ep)])
-    ax[1, 2].axhline(ref["yield"], label=ref_lbl, **REF_STYLE)
+    yields_gated = np.array(yields_gated)
+    # Primary metric is feasibility-gated (an envelope breach zeroes the episode -- see
+    # experiments/eval_utils.feasibility_gated_yield_kg); raw yield is only overlaid on the
+    # episodes gating actually changed, so the "cost of infeasibility" stays visible rather than
+    # silently disappearing behind the headline number.
+    breached = yields_gated < yields
+    ax[1, 2].bar(np.arange(n_ep), yields_gated, color=[_ep_color(i, n_ep, n_expl) for i in range(n_ep)])
+    if breached.any():
+        ax[1, 2].scatter(np.arange(n_ep)[breached], yields[breached], marker="x", color="crimson",
+                         zorder=3, label="raw yield (envelope breach -> gated to 0)")
+        print(f"{breached.sum()}/{n_ep} episodes breached the operating envelope "
+              f"(Wt overflow or viscosity collapse) -> gated to 0 kg in the plot above")
+    ax[1, 2].axhline(ref["yield_gated"], label=ref_lbl, **REF_STYLE)
 
     for axis, key in [(ax[0, 1], "PAA"), (ax[0, 2], "Viscosity"), (ax[1, 0], "Fpaa"), (ax[1, 1], "P")]:
         if key in ref:
@@ -669,8 +706,8 @@ def plot_training_progression(run, ref, ref_lbl, out_dir, show=False):
     ax[1, 1].plot([], [], color="0.72", label="exploration")
     _episode_colorbar(fig, ax[1, 1], n_ep, n_expl, label="trial episode (early -> late)")
 
-    ax[1, 2].set_title("Penicillin yield per episode")
-    ax[1, 2].set_xlabel("episode"); ax[1, 2].set_ylabel("yield (kg)")
+    ax[1, 2].set_title("Penicillin yield per episode (feasibility-gated)")
+    ax[1, 2].set_xlabel("episode"); ax[1, 2].set_ylabel("feasibility-gated yield (kg)")
     ax[1, 2].grid(alpha=.3, axis="y")
 
     _mark_pivot([ax[0, 1], ax[0, 2], ax[1, 0], ax[1, 1]], run.pivot_hours, run.blend_half_width_hours)
@@ -749,13 +786,22 @@ def plot_fs_all_episodes(run, out_dir, show=False):
 # Section C: GP model diagnostics
 # ---------------------------------------------------------------------------
 
-def reconstruct_gp_agent(run, idx=None):
+def reconstruct_gp_agent(run, idx=None, get_config_fn=None):
     """Build a PenSimMCPILCOMultiPhase and load the trial-`idx` GP model from run.log (no
     training). See module docstring point 1 for why this differs from the single-phase
     reconstruct(): DualPhaseModelLearning's gp_inputs/gp_output_list/gp_list/norm_list are
-    READ-ONLY concatenations, so weights are assigned into .phase1/.phase2 directly."""
+    READ-ONLY concatenations, so weights are assigned into .phase1/.phase2 directly.
+
+    Rebuilds cfg from run.params itself rather than reusing run.cfg, so get_config_fn must
+    match whatever was passed to load_run() for this run (regular vs baseline) -- otherwise
+    this reconstructs phase1/phase2 with the WRONG model_learning class. Since
+    RBF_WtMassBalance/RBF_RecipeMean share their exact parameter set with plain RBF (only
+    get_mean differs), a mismatched class still load_state_dict's without error -- it just
+    silently reattaches a prior mean the checkpoint was never fit against. See
+    action_sensitivity_multi_phase_baseline.py for the baseline call site."""
+    get_config_fn = get_config if get_config_fn is None else get_config_fn
     idx = _resolve_trial(run.log, idx)
-    cfg = get_config(**{k: v for k, v in run.params.items() if k in _GET_CONFIG_KEYS})
+    cfg = get_config_fn(**_build_cfg_kwargs(run.params))
     cfg["mc_pilco_init"]["log_path"] = None
     agent = PenSimMCPILCOMultiPhase(pensim_wrapper=PenSimWrapper(**cfg["wrapper_par"]),
                                     **cfg["mc_pilco_init"])
@@ -936,7 +982,10 @@ def plot_multistep_rollout(gp_agent, gp_idx, ho_idx, has_ho, out_dir, pivot_hour
 def _particle_rollout(agent, idx, N=100, seed=0):
     """N particles through the RECORDED action sequence of batch `idx` (particle_pred=True).
     Sequential walk from decision 0 -- reset_step_counter(0) starts the phase router at the
-    true origin (see module docstring point 2)."""
+    true origin (see module docstring point 2). get_next_state now returns full predictive
+    variance (epistemic + observation-noise sigma_n^2, see Model_learning.get_next_state /
+    _update_calib_factor), so the sampled particles already carry the noise floor -- no
+    eval-side correction here."""
     ml = agent.model_learning
     ml.set_eval_mode()
     S = np.asarray(agent.state_samples_history[idx])
@@ -1009,7 +1058,10 @@ def plot_particle_bands(gp_agent, gp_idx, ho_idx, has_ho, out_dir, pivot_hours,
 def _one_step_std_residuals(agent, batch_idx):
     """Teacher-forced one-step standardised residuals, per channel. One-off probe AT each t0
     (not a sequential walk), so reset_step_counter(t0) is called before every single call --
-    see module docstring point 2."""
+    see module docstring point 2. get_next_state now returns full predictive variance
+    (epistemic + observation-noise sigma_n^2, see Model_learning.get_next_state /
+    _update_calib_factor), so dvar is already the right denominator -- no eval-side
+    correction here."""
     ml = agent.model_learning
     tr = torch.tensor(agent.state_samples_history[batch_idx], dtype=agent.dtype, device=agent.device)
     ip = torch.tensor(agent.input_samples_history[batch_idx], dtype=agent.dtype, device=agent.device)

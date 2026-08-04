@@ -1,0 +1,2 @@
+python 03_mcpilco_dual_phase_baseline.py --seed 3 --num_trials 10 --constraint_strength 0.75
+python 03_mcpilco_dual_phase_baseline.py --seed 4 --num_trials 10 --constraint_strength 0.75

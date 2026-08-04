@@ -26,10 +26,15 @@ from mcpilco.pensim_wrapper import (STATE_DIM,
                                     initial_state_var_norm)
 
 
+# Two independent, mutually-exclusive ways to delay Viscosity (see PenSimWrapper.__init__,
+# which raises if both are set): use_offline_measurements=True for the simple "delayed
+# everywhere" reading (GP/cost/policy all see the same held value, self-consistent by
+# construction); pms_visc_delay=True for the MC-PILCO4PMS asymmetric split (GP/cost see the
+# true value, only the policy's input is held). Both default off (plain online Viscosity).
 def get_config(seed=1, num_trials=10, fast=False, dtype=torch.float64, device=torch.device("cuda" if torch.cuda.is_available() else "cpu"),
                pivot_hours=PIVOT_HOURS, blend_half_width_hours=BLEND_HALF_WIDTH_HOURS,
-               risk_weight=0.0, visc_penalty=0.02, harvest_reward=True, constraint_strength=1.5,
-               pms_visc_delay=True):
+               risk_weight=0.0, visc_penalty=0.02, harvest_reward=True, constraint_strength=0.75,
+               pms_visc_delay=False, use_offline_measurements=False):
     """Dual-phase config: same policy/cost/exploration as config_single_phase.get_config, but
     f_model_learning is DualPhaseModelLearning -- two independent Model_learning_RBF_det_time
     instances, each with the SAME per-channel init as the single-phase model, fit on disjoint
@@ -178,11 +183,12 @@ def get_config(seed=1, num_trials=10, fast=False, dtype=torch.float64, device=to
         "policy_optimization_dict": policy_optimization_dict,
     }
 
-    # An explicit parameter (not a bare literal) so it round-trips through note.txt/eval's
+    # Explicit parameters (not bare literals) so they round-trip through note.txt/eval's
     # config reconstruction (see eval_single_phase_lib.py's _GET_CONFIG_KEYS/_build_cfg_kwargs)
     # instead of every reconstruction silently assuming today's default regardless of what a
     # given saved run actually used.
-    wrapper_par = {"seed_offset": seed * 1000, "pms_visc_delay": pms_visc_delay}
+    wrapper_par = {"seed_offset": seed * 1000, "pms_visc_delay": pms_visc_delay,
+                   "use_offline_measurements": use_offline_measurements}
 
     return {"mc_pilco_init": mc_pilco_init, "reinforce_par": reinforce_par,
             "wrapper_par": wrapper_par}

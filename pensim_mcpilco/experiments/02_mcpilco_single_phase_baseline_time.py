@@ -1,5 +1,11 @@
 """
- PYTHONPATH=.. python -m experiments.02_mcpilco_single_phase --seed 1 --num_trials 5 --fast
+ PYTHONPATH=.. python -m experiments.02_mcpilco_single_phase_baseline_time --seed 1 --num_trials 5 --fast
+
+Plain-RBF baseline WITH `time` kept as a GP regressor: identical driver to
+02_mcpilco_single_phase_baseline.py, but built on config_single_phase_baseline_time (same plain-RBF
+swap, no prior means, but `time` is NOT dropped from the GP inputs -- see
+config_single_phase_baseline_time.py) and logging to its own results/single_phase_baseline_time/
+tree so it never collides with the config_single_phase_baseline runs it is compared against.
 """
 import argparse
 import datetime
@@ -12,10 +18,10 @@ _ROOT = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
 _sys.path.insert(0, _ROOT)
 _sys.path.insert(0, _os.path.dirname(_ROOT))
 
-from mcpilco.config_single_phase import get_config
+from mcpilco.config_single_phase_baseline_time import get_config
 from mcpilco.pensim_wrapper import PenSimWrapper, PenSimMCPILCODelayed
 
-_RESULTS_ROOT = Path(_ROOT) / "results" / "single_phase"
+_RESULTS_ROOT = Path(_ROOT) / "results" / "single_phase_baseline_time"
 
 """Auto-incrementing default log dir - not to overwrite:
 seed{seed}_1, seed{seed}_2,etc"""
@@ -42,13 +48,14 @@ def _write_note(log_path, run_params, cfg):
 def main(seed=1, num_trials=10, fast=False, out_dir=None,
          optim_horizon=None, num_anchor_batches=0, num_anchors=None, anchor_var=0.01,
          risk_weight=0.0, visc_penalty=0.02, constraint_strength=0.75, harvest_reward=True,
-         num_high_feed_probes=0):
+         num_high_feed_probes=0, pms_visc_delay=False, use_offline_measurements=False):
     cfg = get_config(seed=seed, num_trials=num_trials, fast=fast,
                      optim_horizon_steps=optim_horizon, num_anchor_batches=num_anchor_batches,
                      num_anchors=num_anchors, anchor_var=anchor_var, risk_weight=risk_weight,
                      visc_penalty=visc_penalty, constraint_strength=constraint_strength,
                      harvest_reward=harvest_reward,
-                     num_high_feed_probes=num_high_feed_probes)
+                     num_high_feed_probes=num_high_feed_probes, pms_visc_delay=pms_visc_delay,
+                     use_offline_measurements=use_offline_measurements)
     log_path = out_dir if out_dir is not None else _next_run_dir(seed)
     cfg["mc_pilco_init"]["log_path"] = log_path
     Path(log_path).mkdir(parents=True, exist_ok=True)
@@ -117,6 +124,17 @@ if __name__ == "__main__":
     p.add_argument("--num_high_feed_probes", type=int, default=0,
                    help="sustained-high-feed batches added to the GP training set before training "
                         "starts, cycling through levels (0.6, 0.8, 1.0) (0 = disabled)")
+    p.add_argument("--pms_visc_delay", action="store_true",
+                   help="use the MC-PILCO4PMS-style delayed/held Viscosity measurement (12h "
+                        "sampling + 4h analysis delay) as control_policy's input, instead of the "
+                        "true instantaneous value (default: off, matching config_single_phase.py's "
+                        "current default)")
+    p.add_argument("--use_offline_measurements", action="store_true",
+                   help="read Viscosity from the simulator's delayed lab-assay proxy (12h "
+                        "sampling + 4h analysis delay) EVERYWHERE -- GP training, cost, and the "
+                        "policy alike, no true-vs-measured split -- instead of the always-live "
+                        "online value. Mutually exclusive with --pms_visc_delay (PenSimWrapper "
+                        "raises if both are set). Default: off (plain online Viscosity).")
     args = p.parse_args()
     # keyword args: this call has outgrown safe positional matching, and a mis-ordered pair here
     # would silently train on the wrong config rather than fail.
@@ -125,4 +143,5 @@ if __name__ == "__main__":
          num_anchors=args.num_anchors, anchor_var=args.anchor_var,
          risk_weight=args.risk_weight, visc_penalty=args.visc_penalty,
          constraint_strength=args.constraint_strength,
-         harvest_reward=args.harvest_reward, num_high_feed_probes=args.num_high_feed_probes)
+         harvest_reward=args.harvest_reward, num_high_feed_probes=args.num_high_feed_probes,
+         pms_visc_delay=args.pms_visc_delay, use_offline_measurements=args.use_offline_measurements)

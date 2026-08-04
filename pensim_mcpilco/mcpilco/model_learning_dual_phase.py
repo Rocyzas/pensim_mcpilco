@@ -33,10 +33,10 @@ from mcpilco.pensim_wrapper import T_SAMPLING, BLEND_HALF_WIDTH_HOURS
 # SAME "1%/99%" convention _blend_weight's k is derived from (not an arbitrarily tighter
 # tolerance): w(pivot_hours - blend_half_width_hours) == _BLEND_SKIP_EPS exactly, so "both
 # phases evaluated" only ever happens strictly inside the +-blend_half_width_hours window, not
-# some wider region -- with the defaults (90+-40h, 46 decisions/batch, T_SAMPLING=5h) that's
-# ~16 of 46 steps/rollout paying for both phases instead of all 46. (A much tighter EPS, e.g.
-# 1e-4, would widen that window to +-~80h instead of +-40h -- measured, not hypothetical: it
-# roughly doubled the extra compute cost before this was caught.)
+# some wider region -- with the defaults (95.5+-45.3h, ~46 decisions/batch, T_SAMPLING=5h) that's
+# ~18 of 46 steps/rollout paying for both phases instead of all 46. (A much tighter EPS, e.g.
+# 1e-4, would roughly double that window instead -- measured, not hypothetical: it roughly
+# doubled the extra compute cost before this was caught.)
 _BLEND_SKIP_EPS = 0.01
 
 
@@ -44,6 +44,7 @@ class DualPhaseModelLearning(torch.nn.Module):
 
     def __init__(self, pivot_step, pivot_hours, phase1_par, phase2_par,
                  blend_half_width_hours=BLEND_HALF_WIDTH_HOURS,
+                 phase_model_cls=Model_learning_RBF_det_time,
                  dtype=torch.float64, device=torch.device("cpu")):
         super().__init__()
         self.pivot_step = pivot_step
@@ -51,8 +52,13 @@ class DualPhaseModelLearning(torch.nn.Module):
         self.blend_half_width_hours = blend_half_width_hours
         self.dtype = dtype
         self.device = device
-        self.phase1 = Model_learning_RBF_det_time(**phase1_par)
-        self.phase2 = Model_learning_RBF_det_time(**phase2_par)
+        # phase_model_cls defaults to the deployed per-channel-prior-mean model, so every existing
+        # config_dual_phase.py call site is unaffected; config_dual_phase_baseline.py is the only
+        # caller that overrides it (to Model_learning_RBF_baseline), for the same plain-RBF
+        # ablation config_single_phase_baseline.py already runs for single-phase -- see
+        # model_learning_baseline.py's docstring for what this removes and why.
+        self.phase1 = phase_model_cls(**phase1_par)
+        self.phase2 = phase_model_cls(**phase2_par)
         self._t = 0
 
     @property
@@ -128,10 +134,16 @@ class DualPhaseModelLearning(torch.nn.Module):
         Skips evaluating whichever phase the weight has collapsed onto (see _BLEND_SKIP_EPS)
         rather than always paying for both. When both are evaluated, next_states/delta_mean
         blend as a plain weighted sum (matching y=(1-w)y1+w*y2 applied every step); delta_var
-        uses the LINEAR-COMBINATION-OF-INDEPENDENT-GAUSSIANS variance
-        Var((1-w)Y1 + w*Y2) = (1-w)^2*Var1 + w^2*Var2 -- correct for a weighted SUM of two
-        independent predictions, not the mixture-of-experts formula (which would apply if a
-        particle stochastically picked one phase or the other instead of blending both).
+        uses the MIXTURE (law-of-total-variance) formula
+        Var = (1-w)*Var1 + w*Var2 + (1-w)*w*(mean1-mean2)^2 -- correct for "one true regime
+        governs, we just don't know exactly when it switched for this rollout", which is what
+        w(t) actually represents here. The previously-used weighted-SUM-of-independent-Gaussians
+        formula, (1-w)^2*Var1 + w^2*Var2, silently halves the reported variance right at w=0.5
+        (where phase1/phase2 disagree the most) and omits the disagreement term entirely --
+        confirmed as the source of measured one-step calibration under-coverage, not just a
+        theoretical concern. That formula would only be correct if both phases' predictions were
+        literally, simultaneously summed -- they aren't; exactly one phase is ever "true" at a
+        given step, we're blending our belief about which.
 
         No special-casing needed for the deterministic `time` channel (both phases compute the
         identical exact-delta formula, so blending two identical values is a no-op) or for
@@ -150,7 +162,8 @@ class DualPhaseModelLearning(torch.nn.Module):
         next2, mean2, var2 = self.phase2.get_next_state(current_state, current_input, particle_pred=particle_pred)
         next_states = (1.0 - w) * next1 + w * next2
         delta_mean = (1.0 - w) * mean1 + w * mean2
-        delta_var = (1.0 - w) ** 2 * var1 + w ** 2 * var2
+        delta_var = ((1.0 - w) * var1 + w * var2
+                     + (1.0 - w) * w * (mean1 - mean2) ** 2)
         return next_states, delta_mean, delta_var
 
     def get_gp_estimate_from_data(self, states, inputs, flg_pretrain=False, gp_index_list=None,

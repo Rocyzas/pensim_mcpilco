@@ -27,10 +27,16 @@ from mcpilco.pensim_wrapper import (STATE_DIM,
                                     initial_state_var_norm)
 
 
+# Two independent, mutually-exclusive ways to delay Viscosity (see PenSimWrapper.__init__,
+# which raises if both are set): use_offline_measurements=True for the simple "delayed
+# everywhere" reading (GP/cost/policy all see the same held value, self-consistent by
+# construction); pms_visc_delay=True for the MC-PILCO4PMS asymmetric split (GP/cost see the
+# true value, only the policy's input is held). Both default off (plain online Viscosity).
 def get_config(seed=1, num_trials=10, fast=False, dtype=torch.float64, device=torch.device("cuda" if torch.cuda.is_available() else "cpu"),
                optim_horizon_steps=None, num_anchor_batches=0, num_anchors=12, anchor_var=0.01,
-               risk_weight=0.0, visc_penalty=0.02, harvest_reward=True, constraint_strength=1.5,
-               num_high_feed_probes=0, high_feed_levels=(0.6, 0.8, 1.0), pms_visc_delay=True):
+               risk_weight=0.0, visc_penalty=0.02, harvest_reward=True, constraint_strength=0.75,
+               num_high_feed_probes=0, high_feed_levels=(0.6, 0.8, 1.0), pms_visc_delay=False,
+               use_offline_measurements=False):
     torch.manual_seed(seed)
     np.random.seed(seed)
 
@@ -51,8 +57,11 @@ def get_config(seed=1, num_trials=10, fast=False, dtype=torch.float64, device=to
         "flg_train_lengthscales": True,
         "lambda_init": np.ones(1),
         "flg_train_lambda": True,
+        # trainable noise
         "sigma_n_init": 0.01 * np.ones(1),
         "flg_train_sigma_n": True,
+        # keep this as it is a fixed CHolesky factorization of the covariance matrix,
+        # not learnable
         "sigma_n_num": 1e-3,
         "dtype": dtype,
         "device": device,
@@ -115,21 +124,37 @@ def get_config(seed=1, num_trials=10, fast=False, dtype=torch.float64, device=to
         # "f_cost_function": PeniConcentrationDenseCost,
         'f_cost_function': PeniMassChangeCost,
 
-        # Every penalty below is now priced in kg-of-penicillin-equivalent BEFORE its lambda is
+        # Every penalty below is priced in kg-of-penicillin-equivalent BEFORE its lambda is
         # applied (see mcpilco/penicillin_cost.py's module/class docstrings), so these numbers are
         # NOT comparable to the pre-refactor values -- 0.5 used to be an inert unit-conversion
-        # accident for visc_penalty and is now ~50x over-priced (confirmed via
-        # experiments/cost_term_report.py: charges ~15,000 kg for a batch that actually loses
-        # ~2,900 kg). Defaults below are a starting point read off that script's sweep, not a
-        # finished calibration -- re-run it (it prints the reward-vs-batch_yield_kg guard and the
-        # per-term verdicts) before trusting a change here, and re-check against GP-PREDICTED
-        # rollouts before treating it as final: viscosity is over-predicted ~4.5x in training
-        # (evaluate_GPs.ipynb G.7), so a value calibrated on real trajectories fires harder there.
+        # accident for visc_penalty and was ~50x over-priced (confirmed via
+        # evaluations/cost_term_report.py -- NOT experiments/, despite older comments here: charged
+        # ~15,000 kg for a batch that actually loses ~2,900 kg). Re-run that script (it prints the
+        # reward-vs-batch_yield_kg guard and the per-term verdicts) after any change here.
         #
-        # soft_penalty (lambda_weight): tank-overflow constraint. Left at the old value -- it is
-        # measured INERT on every reachable trajectory (Wt never nears WT_SOFT), so its magnitude
-        # doesn't currently matter, but it's still scaled by constraint_strength if Wt behaviour
-        # ever changes.
+        # Re-verified 2026-07-29 against seed7_3 (single_phase) / seed8_1 (dual_phase), both trained
+        # under the current 4PMS-direct-viscosity wiring (pms_visc_delay=False):
+        #   - soft_penalty is NO LONGER inert (a stale claim from an earlier build) -- real training
+        #     already breaches WT_OVERFLOW (seed8_1 ep7: max_wt=120,782kg > 120,000kg limit, charged
+        #     807.8kg = 24.7% of that episode's yield), so it is meaningfully constraining today.
+        #   - visc_penalty's cost_term_report.py [SCALE] verdict ("~42x under-priced") is measured on
+        #     a deliberately MILD grazing case (~89 cP, still under the 100 cP hard limit) and should
+        #     NOT be read as "multiply by 42x" -- the ramp is quadratic by design, so it stays weak
+        #     near the soft-start threshold on purpose. On a real episode that actually breaches the
+        #     hard limit (seed8_1 ep5: max_visc=102.4cP), the SAME 0.02 lambda already charges 647kg
+        #     = 17% of that episode's yield -- i.e. it already bites hard on genuine breaches.
+        #   - the GP-overconfidence caveat that used to justify extra caution here is also stale: a
+        #     fresh horizon-by-horizon calibration check (RMSE / predicted-std, evaluate_GPs_00.ipynb
+        #     G.7 method) against seed7_3's trained GPs gives a viscosity ratio that falls from ~4.7x
+        #     at k=5 to ~1.0x (honestly calibrated) by k=45 -- i.e. at the horizon the policy actually
+        #     plans over, mean bias is under 2 cP out of the 0-120 cP encoding range. The old "~4.5x
+        #     over-predicted in training" figure predates the 4PMS rewiring and no longer applies to
+        #     the current model; re-check per-run rather than assuming either figure carries forward.
+        # Net: no evidence currently supports raising soft_penalty or visc_penalty further -- both
+        # already scale appropriately between "grazing a limit" (weak, intentional) and "breaching
+        # it" (double-digit % of yield). risk_weight (below) remains the more clearly unaddressed
+        # lever if more conservatism is wanted.
+        #
         # rate_penalty (lambda_rate): action-chatter SMOOTHNESS PREFERENCE, not a safety constraint
         # -- NOT scaled by constraint_strength (see penicillin_cost.py). 0.02 charges ~1,100 kg
         # (~31% of the good batch's own reward) on the worst-case every-step +/-1 alternation probe,
@@ -143,6 +168,16 @@ def get_config(seed=1, num_trials=10, fast=False, dtype=torch.float64, device=to
         # this outcome-std formulation (e.g. via std_cost_trial_list) before relying on it.
         # constraint_strength: single global knob, multiplies soft_penalty, visc_penalty AND
         # risk_weight together ("how conservative overall"); 1.0 = exactly what those three specify.
+        # Default is 0.75. The earlier 1.5 was recommended by cost_term_report.py's --sweep against
+        # seed7_3, but that calibration predates the sigma_n^2 predictive-variance fix in
+        # Model_learning.get_next_state -- under the OLD over-confident model, 1.5 was the smallest
+        # value keeping catastrophic rows below recipe net_kg. Once the model reports honest (wider)
+        # uncertainty, 1.5 over-penalises the now-wider imagined particle spread and drives an
+        # over-conservative policy. A 3-training-seed sweep (seeds 5,6,7 x cs in {0.5,0.75,1.0,1.5},
+        # results/single_phase_baseline/retune_sweep_stage2_across_seeds.csv) found constraint_strength
+        # is NOT a statistically significant lever in [0.5,1.5] -- training-seed variance dominates and
+        # all CIs overlap -- with only a weak aggregate signal that 1.5 is worst and 0.75 best. 0.75 is
+        # therefore adopted as the best aggregate point estimate, not a claimed optimum.
         # visc_penalty/constraint_strength used to be hardcoded literals here (0.02/1.5),
         # silently ignoring whatever was passed into get_config()/the CLI --visc_penalty flag.
         # The literals happened to match this function's own defaults (see above), so default
@@ -196,11 +231,12 @@ def get_config(seed=1, num_trials=10, fast=False, dtype=torch.float64, device=to
         "policy_optimization_dict": policy_optimization_dict,
     }
 
-    # An explicit parameter (not a bare literal) so it round-trips through note.txt/eval's
+    # Explicit parameters (not bare literals) so they round-trip through note.txt/eval's
     # config reconstruction (see eval_single_phase_lib.py's _GET_CONFIG_KEYS/_build_cfg_kwargs)
     # instead of every reconstruction silently assuming today's default regardless of what a
     # given saved run actually used.
-    wrapper_par = {"seed_offset": seed * 1000, "pms_visc_delay": pms_visc_delay}
+    wrapper_par = {"seed_offset": seed * 1000, "pms_visc_delay": pms_visc_delay,
+                   "use_offline_measurements": use_offline_measurements}
 
     anchor_par = {"num_batches": num_anchor_batches, "num_anchors": num_anchors, "anchor_var": anchor_var}
 

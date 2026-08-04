@@ -1,50 +1,33 @@
 """
-PYTHONPATH=.. python "evaluations/action_sensitivity_multi-phase.py" seed3_1
+PYTHONPATH=.. python "evaluations/action_sensitivity_multi-phase_baseline.py" seed1_1
 
 (Direct file execution, not `-m` -- the hyphen in this filename isn't a valid Python module
-identifier, so it can't be imported or run as `-m evaluations.action_sensitivity_multi-phase`.)
+identifier, so it can't be imported or run as `-m evaluations.action_sensitivity_multi-phase_baseline`.)
 
-Takes only a run id (resolved under results/dual_phase/, or a full/relative path) --
+Same diagnostic as action_sensitivity_multi-phase.py, but for config_dual_phase_baseline runs
+(plain RBF on every channel in BOTH phase1/phase2 -- no Wt mass-balance / Viscosity recipe-mean
+prior means, see model_learning_baseline.py). Only load_agent differs: it resolves run_id under
+results/dual_phase_baseline/ and reconstructs the GP model via config_dual_phase_baseline.get_config
+-- using the regular config_dual_phase.get_config here would silently rebuild each phase's
+Wt/Viscosity as RBF_WtMassBalance/RBF_RecipeMean and reattach a prior mean this run was never fit
+against (their parameter set is identical to plain RBF, so load_state_dict would succeed without
+error -- see eval_multi_phase_lib.reconstruct_gp_agent's docstring).
+
+Takes only a run id (resolved under results/dual_phase_baseline/, or a full/relative path) --
 seed/num_trials/fast/pivot_hours and the trained GPs are read back from that run's own
 note.txt/log.pkl via eval_multi_phase_lib.load_run/reconstruct_gp_agent.
 
-Dual-phase counterpart to evaluations/action_sensitivity.py: same tests (GP lengthscale report,
-action-deafness sweep, true-vs-model one-step and sustained-feed action sensitivity), adapted for
-DualPhaseModelLearning (mcpilco/model_learning_dual_phase.py). The original does NOT work
-unmodified against a dual-phase run -- three real problems, not just renames:
-
-1. `agent.model_learning` is a composite of two Model_learning_RBF_det_time (`.phase1`/
-   `.phase2`), each with STATE_DIM GPs. The original's `reconstruct()` (from diagnose_gp.py)
-   assigns `ml.gp_inputs = ...` etc. directly, but DualPhaseModelLearning exposes those only as
-   READ-ONLY concatenated properties -> AttributeError. Uses
-   evaluations.eval_multi_phase_lib.reconstruct_gp_agent() instead, which assigns into
-   `.phase1`/`.phase2` directly (see that module for why).
-2. The original's `for k in range(ml.num_gp): ... STATE_NAMES[k]` loops assume 5 GPs; the
-   composite has 10 (phase1's 5 channels, then phase2's). STATE_NAMES[k] for k=5..9 is an
-   IndexError. Every such loop here is phase-aware: gp index k -> (phase, channel) via
-   `gp_phase_channel(k)`.
-3. Every `ml.get_next_state(...)` call needs to either go through the actual deployed
-   composite (with `reset_step_counter(j)` set to the decision index being probed -- see
-   `model_action_effect`/`model_rollout`) or bypass it entirely by calling `ml.phase1`/
-   `ml.phase2` directly when the question is about ONE phase's own GP in isolation
-   (`action_deafness_report`) -- mixing these up either desyncs the phase router from the
-   decision index actually being tested, or (for `action_deafness_report`) averages two
-   different batch-time state distributions into one meaningless "reference state".
-
-`model_phase(j, pivot_step)` labels which phase's GP the DEPLOYED model would actually use to
-answer a probe at decision `j`, alongside the early/mid/late `batch_phase` bucketing (a
-different, coarser partition -- kept because the pivot need not land on a batch third). `J_GRID`
-densifies around the pivot so the boundary itself gets probed; those extra points are tagged
-`in_shared_grid=False` and excluded from the `batch_phase` summary (see J_GRID_SHARED below) so a
-cross-script comparison of the "mid" bucket stays valid. `plot_model_phase_summary` breaks sign
-agreement down by phase1 vs phase2 -- the question action_sensitivity.py structurally cannot ask
-for a dual-phase run.
+Dual-phase counterpart to evaluations/action_sensitivity_baseline.py: same tests (GP lengthscale
+report, action-deafness sweep, true-vs-model one-step and sustained-feed action sensitivity),
+adapted for DualPhaseModelLearning -- see action_sensitivity_multi-phase.py's module docstring
+for the three real (not just renamed) differences from the single-phase script.
 """
 import os
 os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
 
 import argparse
 import csv
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -59,8 +42,11 @@ if _os.path.dirname(_ROOT) not in _sys.path:
     _sys.path.insert(0, _os.path.dirname(_ROOT))
 
 import evaluations.eval_multi_phase_lib as lib
+from mcpilco.config_dual_phase_baseline import get_config as baseline_get_config
 from mcpilco.pensim_wrapper import (PenSimWrapper, STATE_NAMES, STATE_DIM, ACTION_DIM,
                                     CONTROL_H, T_SAMPLING)
+
+BASELINE_RESULTS_ROOT = Path(_ROOT) / "results" / "dual_phase_baseline"
 
 CHANNELS = [c for c in STATE_NAMES if c != "time"]
 CHANNEL_IDX = [STATE_NAMES.index(c) for c in CHANNELS]
@@ -102,16 +88,23 @@ def model_phase(j, pivot_step):
 
 
 def load_agent(run_id, trial):
-    run = lib.load_run(run_id)
-    agent, idx = lib.reconstruct_gp_agent(run, idx=trial)
+    """Resolves run_id under results/dual_phase_baseline/ (or as a full/relative path), reads
+    seed/num_trials/fast/pivot_hours back from that run's own note.txt, and reconstructs the
+    trained GP model from log.pkl via config_dual_phase_baseline.get_config (plain RBF for
+    every channel on both phases, see model_learning_baseline.py) -- NOT the regular
+    config_dual_phase, which would silently reattach the Wt/Viscosity prior means this run was
+    trained without (see eval_multi_phase_lib.reconstruct_gp_agent's docstring)."""
+    run = lib.load_run(run_id, get_config_fn=baseline_get_config, results_root=BASELINE_RESULTS_ROOT)
+    agent, idx = lib.reconstruct_gp_agent(run, idx=trial, get_config_fn=baseline_get_config)
     print(f"[load_agent] {run.dir} trial {idx}  pivot_hours={run.pivot_hours:g}")
     return agent, run, idx
 
 
 def lengthscale_report(agent):
-    """Per-GP lengthscales, named by looking up each GP's OWN `active_dims` (the Viscosity GP
-    drops `time`, same as single-phase -- see model_learning_det_time.VISC_ACTIVE_DIMS) AND by
-    which phase it belongs to (gp index k -> (phase, channel) via gp_phase_channel).
+    """Per-GP lengthscales, named by looking up each GP's OWN `active_dims` AND by which phase
+    it belongs to (gp index k -> (phase, channel) via gp_phase_channel). Every GP in this
+    baseline uses the same (full) active_dims -- kept generic anyway so this stays a drop-in
+    match for action_sensitivity_multi-phase.py's reports/plots.
 
     Reports action_ls_ratio = action_lengthscale / geomean(that GP's OTHER lengthscales) instead
     of a hardcoded absolute threshold -- see action_sensitivity.py's lengthscale_report for why
@@ -670,8 +663,8 @@ def main(run_id, trial=None):
 if __name__ == "__main__":
     p = argparse.ArgumentParser()
     p.add_argument("run_id", type=str,
-                   help="run to evaluate, e.g. 'seed3_1' (resolved under results/dual_phase/) "
-                        "or a full/relative path to a run folder")
+                   help="run to evaluate, e.g. 'seed1_1' (resolved under "
+                        "results/dual_phase_baseline/) or a full/relative path to a run folder")
     p.add_argument("--trial", type=int, default=None,
                    help="which trial's GP model to diagnose (default: last saved)")
     args = p.parse_args()

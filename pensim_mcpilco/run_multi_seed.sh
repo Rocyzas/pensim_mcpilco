@@ -39,11 +39,7 @@ done
 
 # the sweep: one entry per run, index becomes the out_dir suffix (seed<N>_<i>)
 VARIANTS=(
-  "--visc_penalty 0.0 --no_harvest_reward --risk_weight 0.0"
-  "--visc_penalty 0.5 --no_harvest_reward --risk_weight 0.0"
-  "--visc_penalty 0.0 --risk_weight 0.0"
-  "--visc_penalty 0.5 --risk_weight 0.0"
-  "--visc_penalty 0.5 --risk_weight 0.01"
+
 )
 COMMON_ARGS=(--num_trials 11)
 

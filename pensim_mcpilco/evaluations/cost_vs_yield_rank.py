@@ -24,7 +24,7 @@ for _p in (_ROOT, _OUTER):
 from mcpilco.pensim_wrapper import batch_yield_kg, WT_SOFT, WT_OVERFLOW, VISC_MAX
 from mcpilco.penicillin_cost import (PeniMassChangeCost, PeniConcentrationDenseCost, VISC_SOFT_START)
 
-SEED_DIR = Path(_ROOT) / "results" / "single_phase" / "seed3_104"
+SEED_DIR = Path(_ROOT) / "results" / "single_phase_baseline" / "seed4_5"
 LOG_PATH = SEED_DIR / "log.pkl"
 MONITOR_PATH = SEED_DIR / "monitor.pkl"
 NOTE_PATH = SEED_DIR / "note.txt"
@@ -34,7 +34,7 @@ monitors = pickle.load(open(MONITOR_PATH, "rb"))
 print(open(NOTE_PATH).read())
 
 cost_fn = PeniMassChangeCost(p_weight=0.05, soft_penalty=0.05, rate_penalty=0.02, risk_weight=0.0, visc_penalty=0.02,
-                              harvest_reward=True, constraint_strength=1.5)
+                              harvest_reward=True, constraint_strength=0.75)
 
 n_episodes = len(log["state_samples_history"])
 costs = np.zeros(n_episodes)

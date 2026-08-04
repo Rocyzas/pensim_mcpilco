@@ -5,14 +5,18 @@
 /pensim_mcpilco-gen/
 /.claude/
 
+
 # Python / editor / OS cruft
 __pycache__/
 *.py[cod]
 .DS_Store
 .ipynb_checkpoints/
+.venv/
 
 # Results
 pensim_mcpilco/experiments/results/
 pensim_mcpilco/results/
 pensim_mcpilco/experiments/rl_vs_pid/
 pensim_mcpilco/evaluations/pivot_point/
+pensim_mcpilco/evaluations/encoding_delta_diagnostic
+pensim_mcpilco/evaluations/pivot*

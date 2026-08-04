@@ -43,17 +43,19 @@ STATE_DIM = len(STATE_NAMES)
 ACTION_DIM = 1
 
 # X, P, Viscosity are offline lab assays on the real plant (12h sampling + 4h analysis
-# delay -- see peni_env_setup.py's X_offline/P_offline/Viscosity_offline). Wt and time stay
-# online/undelayed. See _read_offline / _read's use_offline_measurements below.
+# delay -- see peni_env_setup.py's X_offline/P_offline/Viscosity_offline, which reads the
+# simulator's own delayed/held channel). Wt and time stay online/undelayed.
 #
-# Empty for now: Viscosity's delay is instead handled MC-PILCO4PMS-style (see
-# _ZOHPolicyProxy / PenSimMCPILCODelayed below) -- extract_state must keep returning the
-# TRUE Viscosity so the GP trains on real dynamics and the cost prices real risk; only
-# control_policy's INPUT is zero-order-held. Putting Viscosity in this set would make
-# extract_state feed the GP itself with already-delayed data, which is incompatible with
-# that split. Kept as dormant infrastructure in case X/P ever want the simpler
-# "delayed everywhere" treatment.
-DELAYED_OFFLINE_NAMES = set()
+# This is the SIMPLE, uniform mechanism: whatever's in this set is read from the delayed
+# proxy EVERYWHERE (GP training, cost, and the policy alike -- see _read/extract_state's
+# use_offline_measurements below) -- there is no true-vs-measured split, so it's self-
+# consistent by construction (the GP just learns dynamics on the held signal directly).
+# This is DIFFERENT from, and MUST NOT be combined with, the MC-PILCO4PMS-style asymmetric
+# split (pms_visc_delay / _ZOHPolicyProxy / PenSimMCPILCODelayed below), which keeps the GP
+# on the TRUE signal and only holds what the policy is called with -- PenSimWrapper.__init__
+# asserts these two are never both targeting Viscosity at once. Only Viscosity is in this
+# set (X/P were explored earlier but descoped -- see git history if ever wanted again).
+DELAYED_OFFLINE_NAMES = {"Viscosity"}
 
 # STATE_LOG_CHANNELS = {"S", "Wt", "X", "P"}
 STATE_LOG_CHANNELS = {"Wt", "X", "P"}
@@ -410,11 +412,12 @@ class PenSimWrapper:
 
     def __init__(self, seed_offset=0, use_offline_measurements=False, pms_visc_delay=False):
         self.seed_offset = seed_offset
-        # When True, X/P/Viscosity in the decision-level state (fed to the GP, cost, and
-        # policy alike -- see extract_state) come from the delayed lab-assay proxy instead
-        # of the always-available online ODE state. Default False preserves today's
+        # When True, DELAYED_OFFLINE_NAMES channels (currently just Viscosity) in the
+        # decision-level state (fed to the GP, cost, and policy alike -- see extract_state)
+        # come from the delayed lab-assay proxy instead of the always-available online ODE
+        # state -- uniformly, no true-vs-measured split. Default False preserves today's
         # behavior for every existing caller (setup_recipe_anchors, setup_high_feed_probes,
-        # _measure_init_state_stats, ...). Currently inert (DELAYED_OFFLINE_NAMES is empty).
+        # _measure_init_state_stats, ...).
         self.use_offline_measurements = use_offline_measurements
         # When True, wraps rollout()'s policy argument with _ZOHPolicyProxy so Viscosity is
         # zero-order-held from the most recently released 12h/4h lab sample -- MC-PILCO4PMS
@@ -422,6 +425,18 @@ class PenSimWrapper:
         # true instantaneous Viscosity extract_state always returns. Default False preserves
         # today's behavior.
         self.pms_visc_delay = pms_visc_delay
+        # These two mechanisms are mutually exclusive FOR THE SAME CHANNEL: combining them
+        # would mean extract_state already returns held Viscosity (use_offline_measurements)
+        # while _ZOHPolicyProxy tries to ALSO hold it on top (pms_visc_delay) against a
+        # release table computed independently of what's actually in `states` -- silently
+        # double-delayed, not a real protocol. Fail loudly instead.
+        if use_offline_measurements and pms_visc_delay and "Viscosity" in DELAYED_OFFLINE_NAMES:
+            raise ValueError(
+                "use_offline_measurements (with Viscosity in DELAYED_OFFLINE_NAMES) and "
+                "pms_visc_delay cannot both be True: pick ONE Viscosity-delay mechanism -- "
+                "the simple uniform one (use_offline_measurements) or the MC-PILCO4PMS "
+                "asymmetric one (pms_visc_delay), not both."
+            )
         self._episode = 0
         self._recipe = self._build_default_recipe()
         self.monitor = []
@@ -542,15 +557,25 @@ class PenSimMCPILCO(MCP.MC_PILCO):
         self._anchor_states = None
         self._anchor_vars = None
 
-    # n_seg is distinct feed levels the episode uses, spread evenly across the [-1, 1] range.
-    # This segments the action into n_seg segments, each with length 4 decisions.
-    # for T_Sampling=5h, there are 46 decisions per batch.
-    def _recipe_exploration_policy(self, seg_len=4, n_seg=12):
-        levels = np.linspace(-1.0, 1.0, n_seg) + np.random.uniform(-0.08, 0.08, n_seg)
-        levels = np.clip(levels, -1.0, 1.0)
-        np.random.shuffle(levels)
+    # n_seg segments split the ~230h CONTROL_H as evenly as possible (remainder decisions spread
+    # one-extra-each across the FIRST segments via divmod, not all dumped into the last one --
+    # that used to leave the last shuffled level held for a fraction of the others' duration: 5h
+    # instead of 20h at T_SAMPLING=5, 8h instead of 20h at T_SAMPLING=2, verified). Works
+    # automatically for any T_SAMPLING, no per-value tuning needed.
+    #
+    # Levels are drawn INDEPENDENTLY per segment (not a fixed set of n_seg values permuted across
+    # segments), so a given magnitude can recur in both the growth and production halves of the
+    # batch across different exploration episodes. The previous linspace+shuffle scheme made
+    # level and time-position a strict bijection per episode -- a Monte Carlo check showed that
+    # left only a ~47% chance every level got tried in BOTH halves across 5 exploration episodes.
+    def _recipe_exploration_policy(self, n_seg=12):
+        n_decisions = int(CONTROL_H / T_SAMPLING)  # matches PenSimWrapper.rollout's own n_decisions
+        base, extra = divmod(n_decisions, n_seg)
+        seg_lens = [base + 1 if i < extra else base for i in range(n_seg)]
+        boundaries = np.cumsum([0] + seg_lens)
+        levels = np.random.uniform(-1.0, 1.0, n_seg)
         def pol(state, decision_idx):
-            s = min(int(decision_idx) // seg_len, n_seg - 1)
+            s = min(int(np.searchsorted(boundaries, decision_idx, side="right")) - 1, n_seg - 1)
             return np.array([levels[s]])
         return pol
 
