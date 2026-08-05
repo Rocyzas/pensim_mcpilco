@@ -98,8 +98,8 @@ def _mass_change_reward(cost, states_sequence, P, Wt):
 
 
 class PeniConcentrationCost(CF.Expected_cost):
-    def __init__(self, p_weight=None, soft_penalty=None, rate_penalty=None, risk_weight=0.0,
-                 visc_penalty=0.5, harvest_reward=True, constraint_strength=1.0):
+    def __init__(self, p_weight=0.05, soft_penalty=0.05, rate_penalty=0.02, risk_weight=0.0,
+                 visc_penalty=0.02, harvest_reward=True, constraint_strength=0.75):
         """
         Every penalty below is priced in kg-of-penicillin-equivalent (via `_mass_kg` /
         `_ramp_severity`) BEFORE its lambda is applied, so a lambda of 1 means "trade 1 kg of yield

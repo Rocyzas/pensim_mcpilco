@@ -59,10 +59,10 @@ done
 #     "python -m experiments.03_mcpilco_dual_phase_baseline --seed {SEED} --num_trials 11 --pivot_hours 80"
 #   )
 VARIANTS=(
-  "python experiments/02_mcpilco_single_phase_baseline.py --seed {SEED} --num_trials 10 --cost_function PeniMassChangeCost --t_sampling 5 --out_dir /home/s2889898/Diss/pensim_mcpilco/pensim_mcpilco/results/cluster/full/single/seed{SEED}_0"
-  "python experiments/02_mcpilco_single_phase_baseline_time.py --seed {SEED} --num_trials 10 --cost_function PeniMassChangeCost --t_sampling 5 --out_dir /home/s2889898/Diss/pensim_mcpilco/pensim_mcpilco/results/cluster/full/single/seed{SEED}_1"
-  "python experiments/03_mcpilco_dual_phase_baseline.py --seed {SEED} --num_trials 10 --cost_function PeniMassChangeCost --t_sampling 5 --out_dir /home/s2889898/Diss/pensim_mcpilco/pensim_mcpilco/results/cluster/full/multi/seed{SEED}_0"
-  "python experiments/03_mcpilco_dual_phase_baseline_time.py --seed {SEED} --num_trials 10 --cost_function PeniMassChangeCost --t_sampling 5 --out_dir /home/s2889898/Diss/pensim_mcpilco/pensim_mcpilco/results/cluster/full/multi/seed{SEED}_1"
+  "python experiments/02_mcpilco_single_phase_baseline.py --seed {SEED} --num_trials 10 --cost_function PeniConcentrationDenseCost --t_sampling 5 --out_dir /home/s2889898/Diss/pensim_mcpilco/pensim_mcpilco/results/cluster/full/seed{SEED}_0"
+  "python experiments/02_mcpilco_single_phase_baseline_time.py --seed {SEED} --num_trials 10 --cost_function PeniConcentrationDenseCost --t_sampling 5 --out_dir /home/s2889898/Diss/pensim_mcpilco/pensim_mcpilco/results/cluster/full/seed{SEED}_1"
+  "python experiments/03_mcpilco_dual_phase_baseline.py --seed {SEED} --num_trials 10 --cost_function PeniConcentrationDenseCost --t_sampling 5 --out_dir /home/s2889898/Diss/pensim_mcpilco/pensim_mcpilco/results/cluster/full/seed{SEED}_2"
+  "python experiments/03_mcpilco_dual_phase_baseline_time.py --seed {SEED} --num_trials 10 --cost_function PeniConcentrationDenseCost --t_sampling 5 --out_dir /home/s2889898/Diss/pensim_mcpilco/pensim_mcpilco/results/cluster/full/seed{SEED}_3"
 )
 
 # Appended to EVERY variant above, after its own args -- optional, for flags you don't want to
