@@ -1,11 +1,12 @@
 """
- PYTHONPATH=.. python -m experiments.03_mcpilco_dual_phase_baseline --seed 1 --num_trials 5 --fast
+ PYTHONPATH=.. python -m experiments.03_mcpilco_dual_phase_baseline_priors --seed 1 --num_trials 5 --fast
 
-Plain-RBF ablation baseline: identical driver to 03_mcpilco_dual_phase.py, but built on
-config_dual_phase_baseline (Wt mass-balance / Viscosity recipe-mean prior means removed from BOTH
-phases, and `time` dropped as a GP input -- see config_dual_phase_baseline.py / model_learning_baseline.py)
-and logging to its own results/dual_phase_baseline/ tree so it never collides with config_dual_phase
-runs. This is the dual-phase analog of 02_mcpilco_single_phase_baseline.py.
+Dual-phase plain-RBF baseline WITH recipe-trajectory prior means: identical driver to
+03_mcpilco_dual_phase_baseline.py, but built on config_dual_phase_baseline_priors -- same plain-RBF,
+time-dropped kernels as the baseline, PLUS a non-zero prior mean m(x,u) on every learned channel in
+BOTH phases, measured from 10 pure-recipe simulator batches (see model_learning_priors.py /
+recipe_trajectory_mean.py). Logs to its own results/dual_phase_baseline_priors/ tree so it never
+collides with the config_dual_phase_baseline runs it is compared against.
 """
 import argparse
 import datetime
@@ -21,7 +22,7 @@ _sys.path.insert(0, _os.path.dirname(_ROOT))
 from mcpilco.pensim_wrapper import (PenSimWrapper, PenSimMCPILCOMultiPhaseDelayed,
                                     PIVOT_HOURS, BLEND_HALF_WIDTH_HOURS)
 
-_RESULTS_ROOT = Path(_ROOT) / "results" / "dual_phase_baseline"
+_RESULTS_ROOT = Path(_ROOT) / "results" / "dual_phase_baseline_priors"
 
 # Kept as a plain literal (not imported from mcpilco.config_dual_phase.COST_FUNCTIONS) so
 # argparse's --cost_function choices= can be built at module level, BEFORE the deferred
@@ -72,7 +73,7 @@ def main(seed=1, num_trials=10, fast=False, out_dir=None, pivot_hours=100.0,
     if t_sampling is not None:
         import mcpilco.pensim_wrapper as _pw
         _pw.set_t_sampling(t_sampling)
-    from mcpilco.config_dual_phase_baseline import get_config
+    from mcpilco.config_dual_phase_baseline_priors import get_config
 
     cfg = get_config(seed=seed, num_trials=num_trials, fast=fast, pivot_hours=pivot_hours,
                      blend_half_width_hours=blend_half_width_hours,

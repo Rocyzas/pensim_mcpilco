@@ -1,19 +1,20 @@
 """
-PYTHONPATH=.. python -m evaluations.evaluations_multi_phase_baseline seed1_1
+PYTHONPATH=.. python -m evaluations.evaluations_multi_phase_baseline_priors seed1_1
 
-Same report as evaluations_multi_phase.py, but for config_dual_phase_baseline runs (plain RBF
-on every channel in BOTH phase1/phase2 -- no Wt mass-balance / Viscosity recipe-mean prior
-means, see model_learning_baseline.py). Regenerates every plot/table for a dual-phase-baseline
-MC-PILCO run from just its run id (e.g. "seed1_1", resolved under results/dual_phase_baseline/)
--- everything else (SEED, NUM_TRIALS, FAST, pivot_hours, the trained policy, the trained GPs) is
-read back from that run's own note.txt/log.pkl/monitor.pkl. All output (PNG/CSV) is written flat
-into the run's own folder.
+Same report as evaluations_multi_phase.py, but for config_dual_phase_baseline_priors runs (plain
+RBF on every channel in BOTH phase1/phase2 -- same as the *_baseline model -- PLUS an empirical
+recipe-trajectory prior mean on every learned channel, measured from 10 pure-recipe batches, see
+model_learning_priors.py). Regenerates every plot/table for a dual-phase-baseline-priors MC-PILCO
+run from just its run id (e.g. "seed1_1", resolved under results/dual_phase_baseline_priors/) --
+everything else (SEED, NUM_TRIALS, FAST, pivot_hours, the trained policy, the trained GPs) is read
+back from that run's own note.txt/log.pkl/monitor.pkl. All output (PNG/CSV) is written flat into the
+run's own folder.
 
 Only load_run/reconstruct_gp_agent differ from evaluations_multi_phase.py: they're passed
-config_dual_phase_baseline.get_config and the dual_phase_baseline results root, so the
-reconstructed GP model actually matches what this run was trained with -- passing the regular
-config_dual_phase.get_config here would silently rebuild each phase's Wt/Viscosity with a prior
-mean this run never had (see eval_multi_phase_lib.reconstruct_gp_agent's docstring).
+config_dual_phase_baseline_priors.get_config and the dual_phase_baseline_priors results root, so the
+reconstructed GP model actually matches what this run was trained with -- passing the plain
+config_dual_phase_baseline.get_config here would silently rebuild each phase WITHOUT the recipe prior
+means this run was trained with (see eval_multi_phase_lib.reconstruct_gp_agent's docstring).
 
 Same analysis as evaluations_multi_phase.ipynb / evaluations_multi_phase.py -- both import from
 eval_multi_phase_lib, so there is exactly one implementation of every plot/table.
@@ -27,10 +28,10 @@ if _ROOT not in _sys.path:
     _sys.path.insert(0, _ROOT)
 
 import evaluations.eval_multi_phase_lib as lib
-from mcpilco.config_dual_phase_baseline import get_config as baseline_get_config
+from mcpilco.config_dual_phase_baseline_priors import get_config as baseline_get_config
 from mcpilco.config_single_phase_baseline import get_config as single_phase_baseline_get_config
 
-BASELINE_RESULTS_ROOT = Path(_ROOT) / "results" / "dual_phase_baseline"
+BASELINE_RESULTS_ROOT = Path(_ROOT) / "results" / "dual_phase_baseline_priors"
 
 
 def main(run_id, gp_trial=None, n_eval_seeds=5, eval_base=700000, compare_seed=None,
@@ -100,7 +101,7 @@ if __name__ == "__main__":
     p = argparse.ArgumentParser()
     p.add_argument("run_id", type=str,
                    help="run to evaluate, e.g. 'seed1_1' (resolved under "
-                        "results/dual_phase_baseline/) or a full/relative path to a run folder")
+                        "results/dual_phase_baseline_priors/) or a full/relative path to a run folder")
     p.add_argument("--gp_trial", type=int, default=None,
                    help="which trial's GP model to diagnose in section C (default: last saved)")
     p.add_argument("--n_eval_seeds", type=int, default=5,
@@ -111,7 +112,7 @@ if __name__ == "__main__":
                    help="single shared seed for A.6/A.7 (default: eval_base)")
     p.add_argument("--results_root", type=str, default=None,
                    help="override the results root run_id is resolved under "
-                        "(default: results/dual_phase_baseline/)")
+                        "(default: results/dual_phase_baseline_priors/)")
     args = p.parse_args()
     main(run_id=args.run_id, gp_trial=args.gp_trial, n_eval_seeds=args.n_eval_seeds,
         eval_base=args.eval_base, compare_seed=args.compare_seed,

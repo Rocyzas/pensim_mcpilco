@@ -53,7 +53,7 @@ def get_config(seed=1, num_trials=10, fast=False, dtype=torch.float64, device=to
                pivot_hours=PIVOT_HOURS, blend_half_width_hours=BLEND_HALF_WIDTH_HOURS,
                risk_weight=0.0, visc_penalty=0.02, harvest_reward=True, constraint_strength=0.75,
                pms_visc_delay=False, use_offline_measurements=False, cost_function=None,
-               num_explorations=None):
+               num_explorations=None, num_high_feed_probes=0, high_feed_levels=(0.6, 0.8, 1.0)):
     """Dual-phase config: same policy/cost/exploration as config_single_phase.get_config, but
     f_model_learning is DualPhaseModelLearning -- two independent Model_learning_RBF_det_time
     instances, each with the SAME per-channel init as the single-phase model, fit on disjoint
@@ -62,9 +62,12 @@ def get_config(seed=1, num_trials=10, fast=False, dtype=torch.float64, device=to
     training-split point) with the given blend_half_width_hours -- see
     model_learning_dual_phase.py.
 
-    Unsupported here (see PenSimMCPILCOMultiPhase docstring): recipe anchors, high-feed
-    probes, optim_horizon_steps -- their launch states don't carry the absolute decision time
-    the phase router needs, so those knobs are not exposed by this config at all.
+    Unsupported here (see PenSimMCPILCOMultiPhase docstring): recipe anchors,
+    optim_horizon_steps -- their launch states don't carry the absolute decision time the
+    phase router needs, so those knobs are not exposed by this config at all. High-feed probes
+    (num_high_feed_probes/high_feed_levels) ARE supported: they add full from-t=0 trajectories
+    straight to the GP training set via add_data, which DualPhaseModelLearning splits on
+    absolute array index -- no rollout-relative step involved, see its docstring.
     """
     torch.manual_seed(seed)
     np.random.seed(seed)
@@ -209,5 +212,7 @@ def get_config(seed=1, num_trials=10, fast=False, dtype=torch.float64, device=to
     wrapper_par = {"seed_offset": seed * 1000, "pms_visc_delay": pms_visc_delay,
                    "use_offline_measurements": use_offline_measurements}
 
+    probe_par = {"num_probes": num_high_feed_probes, "levels": high_feed_levels}
+
     return {"mc_pilco_init": mc_pilco_init, "reinforce_par": reinforce_par,
-            "wrapper_par": wrapper_par}
+            "wrapper_par": wrapper_par, "probe_par": probe_par}

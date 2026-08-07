@@ -42,6 +42,7 @@ from mcpilco.config_single_phase_baseline_time import get_config as _single_base
 from mcpilco.config_dual_phase import get_config as _dual_cfg
 from mcpilco.config_dual_phase_baseline import get_config as _dual_baseline_cfg
 from mcpilco.config_dual_phase_baseline_time import get_config as _dual_baseline_time_cfg
+from mcpilco.config_dual_phase_baseline_priors import get_config as _dual_baseline_priors_cfg
 
 _RESULTS = Path(_ROOT) / "results"
 
@@ -54,21 +55,34 @@ SETUPS = {
     "dual_phase":                 (multi_lib,  _dual_cfg,                  "dual_phase"),
     "dual_phase_baseline":        (multi_lib,  _dual_baseline_cfg,        "dual_phase_baseline"),
     "dual_phase_baseline_time":   (multi_lib,  _dual_baseline_time_cfg,   "dual_phase_baseline_time"),
+    "dual_phase_baseline_priors": (multi_lib,  _dual_baseline_priors_cfg, "dual_phase_baseline_priors"),
 }
 
 
-def _resolve(run_id, setup=None):
+def _resolve(run_id, setup=None, results_root=None):
     """Return (lib, get_config_fn, results_root, setup_name). results_root is None when a
     filesystem path was given (load_run resolves the path itself). Raises if a bare run-id is
-    missing or ambiguous across trees -- in which case pass --setup."""
+    missing or ambiguous across trees -- in which case pass --setup.
+
+    results_root overrides the default results/<folder> root for the chosen setup (same
+    convention as the four evaluations_*.py scripts' own --results_root: it becomes the
+    DIRECT parent of run subfolders, not results_root/folder). Since a custom folder's name
+    can't be auto-matched against all 6 SETUPS conventions, it requires --setup too."""
     s = str(run_id)
     is_path = _os.path.sep in s or s.endswith(".pkl") or Path(s).is_absolute()
+
+    if results_root is not None and setup is None:
+        raise ValueError(
+            "--results_root requires --setup (can't auto-detect which eval library/config "
+            "a custom results folder uses)")
 
     # explicit --setup always wins
     if setup is not None:
         if setup not in SETUPS:
             raise ValueError(f"--setup must be one of {list(SETUPS)}, got '{setup}'")
         lib, cfg, folder = SETUPS[setup]
+        if results_root is not None:
+            return lib, cfg, (None if is_path else Path(results_root)), setup
         return lib, cfg, (None if is_path else _RESULTS / folder), setup
 
     # a path: infer the tree from the run folder's parent directory name
@@ -94,8 +108,9 @@ def _resolve(run_id, setup=None):
         f"'{run_id}' exists in multiple setups {matches}; pass --setup <name> to disambiguate.")
 
 
-def main(run_id, n_eval_seeds=5, eval_base=700000, setup=None):
-    lib, get_config_fn, results_root, setup_name = _resolve(run_id, setup=setup)
+def main(run_id, n_eval_seeds=5, eval_base=700000, setup=None, results_root=None):
+    lib, get_config_fn, results_root, setup_name = _resolve(run_id, setup=setup,
+                                                             results_root=results_root)
     run = lib.load_run(run_id, get_config_fn=get_config_fn, results_root=results_root)
     out_dir = run.dir
     held_out = [eval_base + i for i in range(n_eval_seeds)]
@@ -186,9 +201,14 @@ if __name__ == "__main__":
                         "single_phase_baseline,dual_phase,dual_phase_baseline}) or a path to a run folder")
     p.add_argument("--setup", choices=list(SETUPS), default=None,
                    help="force which setup/config to use; required only if the run-id exists in "
-                        "more than one results tree")
+                        "more than one results tree, or whenever --results_root is given")
     p.add_argument("--n_eval_seeds", type=int, default=5,
                    help="number of held-out seeds (block is eval_base..eval_base+n_eval_seeds-1)")
     p.add_argument("--eval_base", type=int, default=700000, help="first held-out seed")
+    p.add_argument("--results_root", type=str, default=None,
+                   help="override the results root run_id is resolved under (default: "
+                        "results/<setup>/); requires --setup, since a custom folder's name "
+                        "can't be auto-matched to one of the 6 setups")
     args = p.parse_args()
-    main(run_id=args.run_id, n_eval_seeds=args.n_eval_seeds, eval_base=args.eval_base, setup=args.setup)
+    main(run_id=args.run_id, n_eval_seeds=args.n_eval_seeds, eval_base=args.eval_base,
+        setup=args.setup, results_root=args.results_root)

@@ -1,2 +1,31 @@
-python 03_mcpilco_dual_phase_baseline.py --seed 3 --num_trials 10 --constraint_strength 0.75
-python 03_mcpilco_dual_phase_baseline.py --seed 4 --num_trials 10 --constraint_strength 0.75
+python ../evaluations/test_seed_policies.py --n_eval_seeds 10 --setup single_phase_baseline seed4_01 --results_root ../results/full/MassCost/single-phase/No_time/
+python ../evaluations/test_seed_policies.py --n_eval_seeds 10 --setup single_phase_baseline_time seed4_11 --results_root ../results/full/MassCost/single-phase/Added_time/
+python ../evaluations/test_seed_policies.py --n_eval_seeds 10 --setup dual_phase_baseline seed4_21 --results_root ../results/full/MassCost/multi-phase/No_time/
+python ../evaluations/test_seed_policies.py --n_eval_seeds 10 --setup dual_phase_baseline_time seed4_31 --results_root ../results/full/MassCost/multi-phase/Added_time/
+
+python ../evaluations/evaluations_single_phase_baseline.py seed4_01 --results_root ../results/full/MassCost/single-phase/No_time
+python ../evaluations/evaluations_single_phase_baseline_time.py seed4_11 --results_root ../results/full/MassCost/single-phase/Added_time
+python ../evaluations/evaluations_multi_phase_baseline.py seed4_21 --results_root ../results/full/MassCost/multi-phase/No_time
+python ../evaluations/evaluations_multi_phase_baseline_time.py seed4_31 --results_root ../results/full/MassCost/multi-phase/Added_time
+
+
+python ../evaluations/test_seed_policies.py --n_eval_seeds 10 --setup single_phase_baseline seed5_01 --results_root ../results/full/MassCost/single-phase/No_time
+python ../evaluations/test_seed_policies.py --n_eval_seeds 10 --setup single_phase_baseline_time seed5_11 --results_root ../results/full/MassCost/single-phase/Added_time
+python ../evaluations/test_seed_policies.py --n_eval_seeds 10 --setup dual_phase_baseline seed5_21 --results_root ../results/full/MassCost/multi-phase/No_time
+python ../evaluations/test_seed_policies.py --n_eval_seeds 10 --setup dual_phase_baseline_time seed5_31 --results_root ../results/full/MassCost/multi-phase/Added_time
+
+python ../evaluations/evaluations_single_phase_baseline.py seed5_01 --results_root ../results/full/MassCost/single-phase/No_time
+python ../evaluations/evaluations_single_phase_baseline_time.py seed5_11 --results_root ../results/full/MassCost/single-phase/Added_time
+python ../evaluations/evaluations_multi_phase_baseline.py seed5_21 --results_root ../results/full/MassCost/multi-phase/No_time
+python ../evaluations/evaluations_multi_phase_baseline_time.py seed5_31 --results_root ../results/full/MassCost/multi-phase/Added_time
+
+
+python ../evaluations/test_seed_policies.py --n_eval_seeds 10 --setup single_phase_baseline seed6_01 --results_root ../results/full/MassCost/single-phase/No_time
+python ../evaluations/test_seed_policies.py --n_eval_seeds 10 --setup single_phase_baseline_time seed6_11 --results_root ../results/full/MassCost/single-phase/Added_time
+python ../evaluations/test_seed_policies.py --n_eval_seeds 10 --setup dual_phase_baseline seed6_21 --results_root ../results/full/MassCost/multi-phase/No_time
+python ../evaluations/test_seed_policies.py --n_eval_seeds 10 --setup dual_phase_baseline_time seed6_31 --results_root ../results/full/MassCost/multi-phase/Added_time
+
+python ../evaluations/evaluations_single_phase_baseline.py seed6_01 --results_root ../results/full/MassCost/single-phase/No_time
+python ../evaluations/evaluations_single_phase_baseline_time.py seed6_11 --results_root ../results/full/MassCost/single-phase/Added_time
+python ../evaluations/evaluations_multi_phase_baseline.py seed6_21 --results_root ../results/full/MassCost/multi-phase/No_time
+python ../evaluations/evaluations_multi_phase_baseline_time.py seed6_31 --results_root ../results/full/MassCost/multi-phase/Added_time

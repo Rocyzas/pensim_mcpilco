@@ -187,8 +187,7 @@ seed7_6 in the single_phase_baseline (I can always train it on more episodes).
 seed3_103 = seed3_104 - MassFunc, T=2, no probs
 seed3_100 =           - PeniConc  T=2, no prbs, 
 
-PLAN
-- Train seed3_12, and observer result (only difference is probes). 
-    If if keeps the yield as good as seed3_7, REMOVE num_high_feed_probes as they are not needed for good yield
-    If yield decreases it means that P(fix) did not help.
-        Then try without P(fix) and with num_high_feed_probes
+
+------------
+1. Compare both cost functions (perhaps concentration gives better single/multi comparison)
+2. next, try 2 explorations and 3 probes (assuming the variation in historical batches)

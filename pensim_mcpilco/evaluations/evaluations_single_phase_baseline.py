@@ -37,8 +37,10 @@ from mcpilco.config_single_phase_baseline import get_config as baseline_get_conf
 BASELINE_RESULTS_ROOT = Path(_ROOT) / "results" / "single_phase_baseline"
 
 
-def main(run_id, gp_trial=None, n_eval_seeds=5, eval_base=700000, compare_seed=None):
-    run = lib.load_run(run_id, get_config_fn=baseline_get_config, results_root=BASELINE_RESULTS_ROOT)
+def main(run_id, gp_trial=None, n_eval_seeds=5, eval_base=700000, compare_seed=None,
+        results_root=None):
+    results_root = BASELINE_RESULTS_ROOT if results_root is None else results_root
+    run = lib.load_run(run_id, get_config_fn=baseline_get_config, results_root=results_root)
     out_dir = run.dir
     compare_seed = compare_seed if compare_seed is not None else eval_base
 
@@ -108,6 +110,10 @@ if __name__ == "__main__":
                    help="first held-out seed (held-out block is eval_base..eval_base+n_eval_seeds-1)")
     p.add_argument("--compare_seed", type=int, default=None,
                    help="single shared seed for A.6/A.7 (default: eval_base)")
+    p.add_argument("--results_root", type=str, default=None,
+                   help="override the results root run_id is resolved under "
+                        "(default: results/single_phase_baseline/)")
     args = p.parse_args()
     main(run_id=args.run_id, gp_trial=args.gp_trial, n_eval_seeds=args.n_eval_seeds,
-        eval_base=args.eval_base, compare_seed=args.compare_seed)
+        eval_base=args.eval_base, compare_seed=args.compare_seed,
+        results_root=args.results_root)

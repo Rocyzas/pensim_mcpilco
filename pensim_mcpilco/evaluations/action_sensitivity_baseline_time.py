@@ -34,11 +34,24 @@ if _os.path.dirname(_ROOT) not in _sys.path:
     _sys.path.insert(0, _os.path.dirname(_ROOT))
 
 import evaluations.eval_single_phase_lib as lib
-from mcpilco.config_single_phase_baseline_time import get_config as baseline_time_get_config
+from mcpilco.config_single_phase_baseline import get_config as _no_time_get_config
+from mcpilco.config_single_phase_baseline_time import get_config as _time_get_config
 from mcpilco.pensim_wrapper import (PenSimWrapper, STATE_NAMES, STATE_DIM, ACTION_DIM,
                                     CONTROL_H, T_SAMPLING, TIME_IDX)
 
-BASELINE_TIME_RESULTS_ROOT = Path(_ROOT) / "results" / "single_phase_baseline_time"
+# --setup name -> get_config fn. Both siblings share the exact same processing logic below
+# (flat model_learning, no phase routing) -- only the config/active_dims differ, so either file
+# can now diagnose either variant. Does NOT extend to the dual-phase scripts: see
+# action_sensitivity_baseline.py's own SETUPS comment for why.
+SETUPS = {
+    "single_phase_baseline":      _no_time_get_config,
+    "single_phase_baseline_time": _time_get_config,
+}
+DEFAULT_RESULTS_ROOT = {
+    "single_phase_baseline":      Path(_ROOT) / "results" / "single_phase_baseline",
+    "single_phase_baseline_time": Path(_ROOT) / "results" / "single_phase_baseline_time",
+}
+DEFAULT_SETUP = "single_phase_baseline_time"
 
 CHANNELS = [c for c in STATE_NAMES if c != "time"]
 CHANNEL_IDX = [STATE_NAMES.index(c) for c in CHANNELS]
@@ -53,14 +66,21 @@ PHASE_COLORS = {"early": "C0", "mid": "C1", "late": "C2"}
 J_GRID_SHARED = [2, 8, 15, 22, 30, 38, 44]
 
 
-def load_agent(run_id, trial):
-    """Resolves run_id under results/single_phase_baseline_time/ (or as a full/relative path),
-    reads seed/num_trials/fast back from that run's own note.txt, and reconstructs the trained GP
-    model from log.pkl via config_single_phase_baseline_time.get_config -- no more separately
-    hand-typing SEED/NUM_TRIALS/FAST."""
-    run = lib.load_run(run_id, get_config_fn=baseline_time_get_config, results_root=BASELINE_TIME_RESULTS_ROOT)
-    agent, idx = lib.reconstruct_gp_agent(run, idx=trial, get_config_fn=baseline_time_get_config)
-    print(f"[load_agent] {run.dir} trial {idx}")
+def load_agent(run_id, trial, setup=DEFAULT_SETUP, results_root=None):
+    """Resolves run_id under results/<setup>/ (or as a full/relative path; --results_root
+    overrides the default root for the chosen setup), reads seed/num_trials/fast back from
+    that run's own note.txt, and reconstructs the trained GP model from log.pkl via the
+    matching get_config for `setup` -- no more separately hand-typing SEED/NUM_TRIALS/FAST.
+    Passing the wrong setup for a run's actual active_dims either crashes reconstruct_gp_agent
+    on a load_state_dict shape mismatch or silently reconstructs a GP the checkpoint was never
+    fit against -- see eval_single_phase_lib.reconstruct_gp_agent's docstring."""
+    if setup not in SETUPS:
+        raise ValueError(f"--setup must be one of {list(SETUPS)}, got '{setup}'")
+    get_config_fn = SETUPS[setup]
+    root = DEFAULT_RESULTS_ROOT[setup] if results_root is None else results_root
+    run = lib.load_run(run_id, get_config_fn=get_config_fn, results_root=root)
+    agent, idx = lib.reconstruct_gp_agent(run, idx=trial, get_config_fn=get_config_fn)
+    print(f"[load_agent] {run.dir} trial {idx}  (setup={setup})")
     return agent, run, idx
 
 
@@ -463,7 +483,7 @@ def plot_first_sign_loss(loss_rows, horizons, out_path, title_suffix=""):
     print(f"saved {out_path}")
 
 
-def main(run_id, trial=None):
+def main(run_id, trial=None, setup=DEFAULT_SETUP, results_root=None):
     N_SIM_SEEDS = 5
     SIM_SEEDS = [424242 + i for i in range(N_SIM_SEEDS)]
     J_GRID = J_GRID_SHARED
@@ -471,7 +491,7 @@ def main(run_id, trial=None):
     HORIZONS = [1, 20]
     OFFMANIFOLD_LEVEL = 0.6
 
-    agent, run, _idx = load_agent(run_id, trial)
+    agent, run, _idx = load_agent(run_id, trial, setup=setup, results_root=results_root)
     out_dir = run.dir
 
     ml = agent.model_learning
@@ -561,9 +581,19 @@ def main(run_id, trial=None):
 if __name__ == "__main__":
     p = argparse.ArgumentParser()
     p.add_argument("run_id", type=str,
-                   help="run to evaluate, e.g. 'seed0_1' (resolved under "
-                        "results/single_phase_baseline_time/) or a full/relative path to a run folder")
+                   help="run to evaluate, e.g. 'seed0_1' (resolved under results/<setup>/, see "
+                        "--setup) or a full/relative path to a run folder")
     p.add_argument("--trial", type=int, default=None,
                    help="which trial's GP model to diagnose (default: last saved)")
+    p.add_argument("--setup", choices=list(SETUPS), default=DEFAULT_SETUP,
+                   help="which single-phase-baseline variant this run was trained with -- "
+                        "'single_phase_baseline_time' (time re-added as a GP input, this "
+                        "script's own default) or 'single_phase_baseline' (time dropped). "
+                        "Picking the wrong one either crashes on a GP "
+                        "active_dims/lengthscales shape mismatch or silently reconstructs a "
+                        "GP the checkpoint was never fit against.")
+    p.add_argument("--results_root", type=str, default=None,
+                   help="override the results root run_id is resolved under (default: "
+                        "results/<setup>/)")
     args = p.parse_args()
-    main(run_id=args.run_id, trial=args.trial)
+    main(run_id=args.run_id, trial=args.trial, setup=args.setup, results_root=args.results_root)

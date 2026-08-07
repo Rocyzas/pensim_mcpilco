@@ -321,38 +321,86 @@ def initial_state_var_norm():
     return _measure_init_state_stats()[1]
 
 
-PROBE_BLOCK_HOURS = 40.0
+# Two dither timescales (see PROBE_PLAN). At the default T_SAMPLING=5 these round to 8- and
+# 2-decision blocks (40h and 10h) over a 45-decision batch. Both are balanced -- equal time at
+# +level and -level, up to the odd trailing block, which leaves a residual mean action of only
+# ~+0.02..0.04 -- so what the pair varies is the TIMESCALE on which feed moves, not how much of it
+# there is on average.
+PROBE_SLOW_BLOCK_HOURS = 40.0
+PROBE_FAST_BLOCK_HOURS = 12.0
+
+# Where the sustained +/- steps switch on. PIVOT_HOURS is the growth->production boundary the
+# dual-phase model already splits on, so the step lands entirely inside the production window --
+# the region where the feed->P response reverses sign and where a step's effect ACCUMULATES rather
+# than showing up within a decision or two. Deliberately bound to the module-level default and NOT
+# to config_dual_phase's --pivot_hours: that flag moves where the MODEL splits, while this is a
+# property of the PROCESS, and letting it drift per run would make probe sets incomparable across
+# runs that differ only in their model split.
+PROBE_PROD_START_HOURS = PIVOT_HOURS
 
 
-def _ramp_profile(level, n):
-    """0 -> level -> 0 triangle over the batch: the action changes almost every decision."""
-    half = n // 2
-    up = np.linspace(0.0, level, half, endpoint=False)
-    down = np.linspace(level, 0.0, n - half)
-    return np.concatenate([up, down])
-
-
-def _step_high_low_profile(level, n):
-    """One switch: sustained +level for the first half, sustained -level for the second."""
-    half = n // 2
-    return np.concatenate([np.full(half, level), np.full(n - half, -level)])
-
-
-def _alternating_blocks_profile(level, n, block_hours=PROBE_BLOCK_HOURS):
-    """+level/-level square wave in `block_hours`-wide blocks: repeated switches spread through
-    the whole batch, rather than _step_high_low_profile's single one."""
+def _alternating_blocks_profile(level, n, block_hours):
+    """+level/-level square wave in `block_hours`-wide blocks."""
     block_decisions = max(1, int(round(block_hours / T_SAMPLING)))
     block = (np.arange(n) // block_decisions) % 2
     return np.where(block == 0, level, -level)
 
 
-# Cycled round-robin across probes (see setup_high_feed_probes): each shape sustains high/low feed
-# differently, giving the GP training set a range of sustained-feed patterns rather than just one.
+def _prod_step_profile(level, n, start_hours=PROBE_PROD_START_HOURS):
+    """0 (pure recipe) through the growth phase, then a single sustained `level` to batch end.
+
+    One switch, held for the whole production window -- the opposite extreme from the dithers:
+    they answer "how does P respond to feed moving", this answers "how does P respond to feed
+    STAYING moved", which is the accumulating response the dithers deliberately average out.
+    """
+    start = min(max(int(round(start_hours / T_SAMPLING)), 0), n)
+    return np.concatenate([np.zeros(start), np.full(n - start, level)])
+
+
+def _dither_slow_profile(level, n):
+    return _alternating_blocks_profile(level, n, PROBE_SLOW_BLOCK_HOURS)
+
+
+def _dither_fast_profile(level, n):
+    return _alternating_blocks_profile(level, n, PROBE_FAST_BLOCK_HOURS)
+
+
+def _prod_step_up_profile(level, n):
+    return _prod_step_profile(level, n)
+
+
+def _prod_step_down_profile(level, n):
+    return _prod_step_profile(-level, n)
+
+
 PROBE_SHAPES = {
-    "ramp": _ramp_profile,
-    "step_high_low": _step_high_low_profile,
-    "alternating_blocks": _alternating_blocks_profile,
+    "dither_slow": _dither_slow_profile,
+    "dither_fast": _dither_fast_profile,
+    "prod_step_up": _prod_step_up_profile,
+    "prod_step_down": _prod_step_down_profile,
 }
+
+# The probe SET, in order (see setup_high_feed_probes): (shape, index into `levels`). Probe i takes
+# entry i % 4, so the default num_probes=4 rolls exactly one of each and higher counts replicate the
+# set under fresh batch realisations. Read as a designed experiment rather than four independent
+# probes:
+#   0/1  balanced dither at two timescales. Same zero-mean excitation, different frequency, so the
+#        pair separates the fast (within-decision) response from the slow (accumulated) one -- the
+#        effect of interest here being the slow one.
+#   2/3  sustained +step and -step over the production window, at the SAME magnitude so the pair
+#        brackets the feed->P sign reversal symmetrically from both sides. This is what the GP
+#        cannot get anywhere else: exploration re-draws its level every ~19h and the dithers flip
+#        sign by construction, so neither ever holds feed off-recipe long enough for the late-phase
+#        response to integrate and reverse.
+# The two step entries share level index 2 on purpose -- a +/- pair at different magnitudes would
+# confound "which side of nominal" with "how far from nominal", which is exactly the confound the
+# bracket exists to remove.
+PROBE_PLAN = (
+    ("dither_slow", 0),
+    ("dither_fast", 1),
+    ("prod_step_up", 2),
+    ("prod_step_down", 2),
+)
 
 
 # MC-PILCO4PMS-style Viscosity delay: 12h lab-assay sampling cadence + 4h analysis turnaround
@@ -677,34 +725,38 @@ class PenSimMCPILCO(MCP.MC_PILCO):
               f"(+{num_batches} into GP training set); optim_horizon_steps={self.optim_horizon_steps}")
         return self._anchor_states
 
-    def setup_high_feed_probes(self, num_probes=3, levels=(0.6, 0.8, 1.0)):
+    def setup_high_feed_probes(self, num_probes=4, levels=(0.6, 0.8, 1.0)):
         """Roll `num_probes` FIXED, TIME-VARYING feed-rate batches on a FRESH wrapper and add them
-        straight to the GP training set. Call ONCE before reinforce() (independent of, and
-        combinable with, setup_recipe_anchors).
+        straight to the GP training set, ON TOP OF the `num_explorations` exploration batches
+        reinforce() rolls itself. Call ONCE before reinforce() (independent of, and combinable
+        with, setup_recipe_anchors).
 
         Why this exists: the X and Viscosity GPs learn an action-lengthscale of 11.6-39.7 on the
         [-1, 1] action input in every reward-shaping config tried so far (see evaluations plan,
         Finding 5) -- i.e. the model has decided feed rate barely affects biomass growth or
-        viscosity at all. That is plausibly because ordinary exploration
-        (`_recipe_exploration_policy`) rarely SUSTAINS a high feed level long enough to reach the
-        viscosity-collapse regime, and any exploration batch that does collapse is rejected and
-        re-rolled by `get_data_from_system`'s FAILED_YIELD_KG screen -- so the GP training set is
-        structurally starved of exactly the data that would teach it the action matters there.
+        viscosity at all -- and the late-phase feed->P response comes out with the WRONG SIGN.
+        Both are data problems, not model problems: `_recipe_exploration_policy` re-draws its level
+        every ~19h, so it never HOLDS feed off-recipe long enough for a response that accumulates
+        over the production window to show up at all. Averaged over a batch, its excitation looks
+        like noise around the recipe, and the GP fits it as such.
 
-        These probes are deliberately NOT screened by that yield threshold: the point is to give the
-        GP real (state, high-action, viscosity-response) trajectories, collapse included, not to
-        curate a "safe" dataset the way exploration episodes do.
+        The probe set (PROBE_PLAN) attacks that directly: two balanced dithers at different
+        timescales to separate the fast response from the slow one, then a sustained +/- step pair
+        confined to the production window to observe feed->P on both sides of the sign reversal.
+        See PROBE_PLAN for the per-probe rationale.
+
+        Probes are deliberately unscreened -- collapsed batches are kept, since a batch that
+        collapses under sustained overfeed is precisely the observation the GP is missing.
         """
         seed_offset = self.system.seed_offset
         fresh = PenSimWrapper(seed_offset=seed_offset)
         n_decisions = int(CONTROL_H / self.T_sampling)
-        shape_names = list(PROBE_SHAPES.keys())
 
         np_state = np.random.get_state()
         used = []
         for i in range(num_probes):
-            level = levels[i % len(levels)]
-            shape_name = shape_names[i % len(shape_names)]
+            shape_name, level_idx = PROBE_PLAN[i % len(PROBE_PLAN)]
+            level = levels[level_idx % len(levels)]
             profile = PROBE_SHAPES[shape_name](level, n_decisions)
             used.append((shape_name, level))
             probe_policy = lambda state, decision_idx, profile=profile: np.array(
@@ -783,9 +835,19 @@ class PenSimMCPILCOMultiPhase(PenSimMCPILCO):
     order, so resetting once up front and letting the wrapper self-increment is enough to keep
     it aligned with absolute decision time.
 
-    setup_recipe_anchors/setup_high_feed_probes/optim_horizon_steps are unsupported here:
-    they launch particles from arbitrary/relative batch times, which the phase router (keyed
-    on ROLLOUT-RELATIVE step, assumed == absolute decision index) cannot interpret correctly.
+    setup_recipe_anchors/optim_horizon_steps are unsupported here: they launch particles
+    from arbitrary/relative batch times, which the phase router (keyed on ROLLOUT-RELATIVE
+    step, assumed == absolute decision index) cannot interpret correctly -- an anchor state
+    plucked from, say, hour 150 of a recipe batch would be handed to reinforce_policy as a
+    particle-init point, then rolled out starting from step 0, so the router would treat
+    hour-150 physics as if they were hour-0.
+
+    setup_high_feed_probes IS supported (unlike the two above): it only ever calls
+    model_learning.add_data() with FULL from-t=0 trajectories (see PenSimMCPILCO's own
+    implementation, which this class inherits unchanged), and DualPhaseModelLearning.add_data
+    splits purely on ABSOLUTE array index at pivot_step -- no rollout-relative step counter
+    involved -- so a probe batch is routed to phase1/phase2 exactly like any other full
+    training episode.
     """
 
     def apply_policy(self, *args, **kwargs):
@@ -803,10 +865,6 @@ class PenSimMCPILCOMultiPhase(PenSimMCPILCO):
             "setup_recipe_anchors is not supported with PenSimMCPILCOMultiPhase "
             "(anchor launch states don't carry the absolute decision time the phase "
             "router needs)")
-
-    def setup_high_feed_probes(self, *args, **kwargs):
-        raise NotImplementedError(
-            "setup_high_feed_probes is not supported with PenSimMCPILCOMultiPhase")
 
 
 class PenSimMCPILCOMultiPhaseDelayed(PenSimMCPILCOMultiPhase):

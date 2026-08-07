@@ -85,11 +85,11 @@ MODEL_STYLE = dict(color="C0", lw=2.0, zorder=5)
 _GET_CONFIG_KEYS = ("seed", "num_trials", "fast", "pivot_hours", "blend_half_width_hours",
                     "risk_weight", "visc_penalty", "constraint_strength", "harvest_reward",
                     "pms_visc_delay", "use_offline_measurements",
-                    # Both absent in note.txt for runs predating these params -- correctly falls
+                    # Absent in note.txt for runs predating these params -- correctly falls
                     # through to get_config's own hardcoded defaults in _build_cfg_kwargs below,
                     # which IS what those older runs actually trained with (no setdefault needed,
                     # unlike the two Viscosity-delay flags above).
-                    "cost_function", "num_explorations")
+                    "cost_function", "num_explorations", "num_high_feed_probes")
 
 
 def _build_cfg_kwargs(params):

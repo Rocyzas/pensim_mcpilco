@@ -104,8 +104,9 @@ def main(seed=1, num_trials=10, fast=False, out_dir=None,
     # multi-origin short rollouts: build the fixed anchor set once, before training (no-op if disabled)
     if num_anchor_batches > 0:
         agent.setup_recipe_anchors(**cfg["anchor_par"])
-    # sustained high-feed probes: give the X/Viscosity GPs real data in the collapse-relevant
-    # region before training starts (no-op if disabled). See setup_high_feed_probes docstring.
+    # probe batches: excite the feed->response channels the exploration policy structurally
+    # cannot (sustained, off-recipe, held across the production window), before training starts
+    # (no-op if disabled). See PROBE_PLAN / setup_high_feed_probes docstring.
     if num_high_feed_probes > 0:
         agent.setup_high_feed_probes(**cfg["probe_par"])
     agent.reinforce(**cfg["reinforce_par"])
@@ -145,11 +146,14 @@ if __name__ == "__main__":
     p.add_argument("--no_harvest_reward", dest="harvest_reward", action="store_false",
                    help="score only in-tank mass, ignoring penicillin drawn off by the discharge "
                         "pulses (~20%% of batch_yield_kg). Default is to credit it.")
-    # targeted high-feed exploration: fixed sustained-feed batches added to the GP training set
-    # before trial 0, so the X/Viscosity GPs see the collapse-relevant region (0 = disabled).
-    p.add_argument("--num_high_feed_probes", type=int, default=0,
-                   help="sustained-high-feed batches added to the GP training set before training "
-                        "starts, cycling through levels (0.6, 0.8, 1.0) (0 = disabled)")
+    # targeted probing: fixed-profile batches added to the GP training set before trial 0, on top
+    # of the exploration batches, so the GPs see sustained off-recipe feed (0 = disabled).
+    p.add_argument("--num_high_feed_probes", type=int, nargs="?", const=4, default=0,
+                   help="fixed-profile probe batches added to the GP training set before training "
+                        "starts, ON TOP OF --num_explorations. Bare flag = 4 = one of each probe "
+                        "in PROBE_PLAN (slow dither, fast dither, sustained +/- production-window "
+                        "steps); higher counts replicate the set under fresh batch realisations "
+                        "(0 = disabled)")
     p.add_argument("--pms_visc_delay", action="store_true",
                    help="use the MC-PILCO4PMS-style delayed/held Viscosity measurement (12h "
                         "sampling + 4h analysis delay) as control_policy's input, instead of the "

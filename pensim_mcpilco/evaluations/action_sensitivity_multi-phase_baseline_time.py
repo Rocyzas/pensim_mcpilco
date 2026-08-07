@@ -1,26 +1,28 @@
 """
-PYTHONPATH=.. python "evaluations/action_sensitivity_multi-phase_baseline.py" seed1_1
+PYTHONPATH=.. python "evaluations/action_sensitivity_multi-phase_baseline_time.py" seed1_1
 
 (Direct file execution, not `-m` -- the hyphen in this filename isn't a valid Python module
-identifier, so it can't be imported or run as `-m evaluations.action_sensitivity_multi-phase_baseline`.)
+identifier, so it can't be imported or run as `-m evaluations.action_sensitivity_multi-phase_baseline_time`.)
 
-Same diagnostic as action_sensitivity_multi-phase.py, but for config_dual_phase_baseline runs
-(plain RBF on every channel in BOTH phase1/phase2 -- no Wt mass-balance / Viscosity recipe-mean
-prior means, see model_learning_baseline.py). Only load_agent differs: it resolves run_id under
-results/dual_phase_baseline/ and reconstructs the GP model via config_dual_phase_baseline.get_config
--- using the regular config_dual_phase.get_config here would silently rebuild each phase's
-Wt/Viscosity as RBF_WtMassBalance/RBF_RecipeMean and reattach a prior mean this run was never fit
-against (their parameter set is identical to plain RBF, so load_state_dict would succeed without
-error -- see eval_multi_phase_lib.reconstruct_gp_agent's docstring).
+Same diagnostic as action_sensitivity_multi-phase.py, but for config_dual_phase_baseline_time
+runs (plain RBF on every channel in BOTH phase1/phase2, WITH time kept as a GP input regressor
+-- see config_dual_phase_baseline_time.py / model_learning_baseline.py). Only load_agent
+differs: it resolves run_id under results/dual_phase_baseline_time/ and reconstructs the GP
+model via config_dual_phase_baseline_time.get_config -- using config_dual_phase.get_config or
+config_dual_phase_baseline.get_config here would silently rebuild the wrong architecture
+(their parameter sets can overlap enough that load_state_dict succeeds without error -- see
+eval_multi_phase_lib.reconstruct_gp_agent's docstring; a full active_dims mismatch instead
+raises a shape-mismatch RuntimeError, which is how this gap was originally found).
 
-Takes only a run id (resolved under results/dual_phase_baseline/, or a full/relative path) --
-seed/num_trials/fast/pivot_hours and the trained GPs are read back from that run's own
-note.txt/log.pkl via eval_multi_phase_lib.load_run/reconstruct_gp_agent.
+Takes only a run id (resolved under results/dual_phase_baseline_time/, or a full/relative
+path) -- seed/num_trials/fast/pivot_hours and the trained GPs are read back from that run's
+own note.txt/log.pkl via eval_multi_phase_lib.load_run/reconstruct_gp_agent.
 
-Dual-phase counterpart to evaluations/action_sensitivity_baseline.py: same tests (GP lengthscale
-report, action-deafness sweep, true-vs-model one-step and sustained-feed action sensitivity),
-adapted for DualPhaseModelLearning -- see action_sensitivity_multi-phase.py's module docstring
-for the three real (not just renamed) differences from the single-phase script.
+Dual-phase counterpart to evaluations/action_sensitivity_baseline_time.py: same tests (GP
+lengthscale report, action-deafness sweep, true-vs-model one-step and sustained-feed action
+sensitivity), adapted for DualPhaseModelLearning -- see action_sensitivity_multi-phase.py's
+module docstring for the three real (not just renamed) differences from the single-phase
+script.
 """
 import os
 os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
@@ -44,34 +46,22 @@ if _os.path.dirname(_ROOT) not in _sys.path:
 import evaluations.eval_multi_phase_lib as lib
 from mcpilco.config_dual_phase_baseline import get_config as _no_time_get_config
 from mcpilco.config_dual_phase_baseline_time import get_config as _time_get_config
-from mcpilco.config_dual_phase_baseline_priors import get_config as _priors_get_config
 from mcpilco.pensim_wrapper import (PenSimWrapper, STATE_NAMES, STATE_DIM, ACTION_DIM,
                                     CONTROL_H, T_SAMPLING)
 
-# --setup name -> get_config fn. All three share the exact same DualPhaseModelLearning
-# processing logic below -- only the config/model_learning class differs, so this one file can
-# diagnose any dual-phase-baseline variant. Does NOT extend to the single-phase scripts: see
-# action_sensitivity_baseline.py's own SETUPS comment for why.
-#
-# dual_phase_baseline_priors is NOT just a config swap like the no-time/time pair: it's built on
-# config_dual_phase_baseline (no-time) but reconstructs Model_learning_RBF_recipe_priors
-# (recipe-trajectory prior mean on every channel) instead of Model_learning_RBF_baseline
-# (zero mean). Picking dual_phase_baseline here for a priors run does NOT crash -- per
-# model_learning_priors.py's own docstring, "parameter set is identical to plain RBF so saved
-# state_dicts stay load-compatible" -- it silently reconstructs the WRONG model (missing the
-# recipe-mean prior), corrupting every downstream number. Verified: load_state_dict succeeds
-# and returns a plain RBF with no error at all when pointed at a priors checkpoint.
+# --setup name -> get_config fn. Both siblings share the exact same DualPhaseModelLearning
+# processing logic below -- only the config/active_dims differ, so either file can now
+# diagnose either dual-phase-baseline variant. Does NOT extend to the single-phase scripts:
+# see action_sensitivity_baseline.py's own SETUPS comment for why.
 SETUPS = {
-    "dual_phase_baseline":        _no_time_get_config,
-    "dual_phase_baseline_time":   _time_get_config,
-    "dual_phase_baseline_priors": _priors_get_config,
+    "dual_phase_baseline":      _no_time_get_config,
+    "dual_phase_baseline_time": _time_get_config,
 }
 DEFAULT_RESULTS_ROOT = {
-    "dual_phase_baseline":        Path(_ROOT) / "results" / "dual_phase_baseline",
-    "dual_phase_baseline_time":   Path(_ROOT) / "results" / "dual_phase_baseline_time",
-    "dual_phase_baseline_priors": Path(_ROOT) / "results" / "dual_phase_baseline_priors",
+    "dual_phase_baseline":      Path(_ROOT) / "results" / "dual_phase_baseline",
+    "dual_phase_baseline_time": Path(_ROOT) / "results" / "dual_phase_baseline_time",
 }
-DEFAULT_SETUP = "dual_phase_baseline"
+DEFAULT_SETUP = "dual_phase_baseline_time"
 
 CHANNELS = [c for c in STATE_NAMES if c != "time"]
 CHANNEL_IDX = [STATE_NAMES.index(c) for c in CHANNELS]
@@ -116,13 +106,12 @@ def load_agent(run_id, trial, setup=DEFAULT_SETUP, results_root=None):
     """Resolves run_id under results/<setup>/ (or as a full/relative path; --results_root
     overrides the default root for the chosen setup), reads seed/num_trials/fast/pivot_hours
     back from that run's own note.txt, and reconstructs the trained GP model from log.pkl via
-    the matching get_config for `setup` -- NOT the regular config_dual_phase, which would
-    silently reattach the Wt/Viscosity prior means this run was trained without. Picking the
-    wrong setup among the three here has two DIFFERENT failure modes: no-time vs time crashes
-    reconstruct_gp_agent on a load_state_dict shape mismatch (active_dims differ), while
-    dual_phase_baseline vs dual_phase_baseline_priors does NOT crash at all -- their state_dicts
-    are parameter-compatible by design (see model_learning_priors.py), so picking the wrong one
-    of those two silently reconstructs a model with the wrong prior mean instead."""
+    the matching get_config for `setup` (plain RBF for every channel on both phases, see
+    model_learning_baseline.py) -- NOT the regular config_dual_phase, which would silently
+    reattach the Wt/Viscosity prior means this run was trained without. Passing the wrong
+    setup (no-time vs time) for a run's actual active_dims crashes reconstruct_gp_agent on a
+    load_state_dict shape mismatch -- see eval_multi_phase_lib.reconstruct_gp_agent's
+    docstring; this is literally how the gap this script closes was originally found."""
     if setup not in SETUPS:
         raise ValueError(f"--setup must be one of {list(SETUPS)}, got '{setup}'")
     get_config_fn = SETUPS[setup]
@@ -136,8 +125,8 @@ def load_agent(run_id, trial, setup=DEFAULT_SETUP, results_root=None):
 def lengthscale_report(agent):
     """Per-GP lengthscales, named by looking up each GP's OWN `active_dims` AND by which phase
     it belongs to (gp index k -> (phase, channel) via gp_phase_channel). Every GP in this
-    baseline uses the same (full) active_dims -- kept generic anyway so this stays a drop-in
-    match for action_sensitivity_multi-phase.py's reports/plots.
+    baseline uses the same (full, time-included) active_dims -- kept generic anyway so this
+    stays a drop-in match for action_sensitivity_multi-phase.py's reports/plots.
 
     Reports action_ls_ratio = action_lengthscale / geomean(that GP's OTHER lengthscales) instead
     of a hardcoded absolute threshold -- see action_sensitivity.py's lengthscale_report for why
@@ -702,13 +691,10 @@ if __name__ == "__main__":
                    help="which trial's GP model to diagnose (default: last saved)")
     p.add_argument("--setup", choices=list(SETUPS), default=DEFAULT_SETUP,
                    help="which dual-phase-baseline variant this run was trained with -- "
-                        "'dual_phase_baseline' (this script's own default: plain RBF, time "
-                        "dropped), 'dual_phase_baseline_time' (time re-added -- picking this "
-                        "pair wrong crashes on a GP active_dims/lengthscales shape mismatch), "
-                        "or 'dual_phase_baseline_priors' (same no-time RBF but with a "
-                        "recipe-trajectory prior mean on every channel -- picking baseline vs "
-                        "priors wrong does NOT crash, it silently reconstructs the wrong "
-                        "model, see load_agent's docstring).")
+                        "'dual_phase_baseline_time' (time re-added as a GP input, this "
+                        "script's own default) or 'dual_phase_baseline' (time dropped). "
+                        "Picking the wrong one crashes on a GP active_dims/lengthscales shape "
+                        "mismatch.")
     p.add_argument("--results_root", type=str, default=None,
                    help="override the results root run_id is resolved under (default: "
                         "results/<setup>/)")
