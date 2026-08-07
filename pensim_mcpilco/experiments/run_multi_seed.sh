@@ -59,10 +59,12 @@ done
 #     "python -m experiments.03_mcpilco_dual_phase_baseline --seed {SEED} --num_trials 11 --pivot_hours 80"
 #   )
 VARIANTS=(
-  "python experiments/02_mcpilco_single_phase_baseline.py --seed {SEED} --num_trials 10 --cost_function PeniConcentrationDenseCost --t_sampling 5 --out_dir /home/s2889898/Diss/pensim_mcpilco/pensim_mcpilco/results/cluster/full/seed{SEED}_0"
-  "python experiments/02_mcpilco_single_phase_baseline_time.py --seed {SEED} --num_trials 10 --cost_function PeniConcentrationDenseCost --t_sampling 5 --out_dir /home/s2889898/Diss/pensim_mcpilco/pensim_mcpilco/results/cluster/full/seed{SEED}_1"
-  "python experiments/03_mcpilco_dual_phase_baseline.py --seed {SEED} --num_trials 10 --cost_function PeniConcentrationDenseCost --t_sampling 5 --out_dir /home/s2889898/Diss/pensim_mcpilco/pensim_mcpilco/results/cluster/full/seed{SEED}_2"
-  "python experiments/03_mcpilco_dual_phase_baseline_time.py --seed {SEED} --num_trials 10 --cost_function PeniConcentrationDenseCost --t_sampling 5 --out_dir /home/s2889898/Diss/pensim_mcpilco/pensim_mcpilco/results/cluster/full/seed{SEED}_3"
+  # "python experiments/02_mcpilco_single_phase_baseline.py --seed {SEED} --num_trials 10 --cost_function PeniConcentrationDenseCost --t_sampling 5 --out_dir /home/s2889898/Diss/pensim_mcpilco/pensim_mcpilco/results/cluster/full/ConcCost/single_phase/No_time/seed{SEED}_0"
+  # "python experiments/02_mcpilco_single_phase_baseline_time.py --seed {SEED} --num_trials 10 --cost_function PeniConcentrationDenseCost --t_sampling 5 --out_dir /home/s2889898/Diss/pensim_mcpilco/pensim_mcpilco/results/cluster/full/ConcCost/single_phase/Added_time/seed{SEED}_1"
+  "python experiments/03_mcpilco_dual_phase_baseline.py --seed {SEED} --num_trials 10 --num_explorations 10 --cost_function PeniConcentrationDenseCost --t_sampling 5 --out_dir /home/s2889898/Diss/pensim_mcpilco/pensim_mcpilco/results/cluster/full/ConcCost/dual_phase/No_time/10expl/seed{SEED}_2"
+  "python experiments/03_mcpilco_dual_phase_baseline_priors.py --seed {SEED} --num_trials 10 --cost_function PeniConcentrationDenseCost --t_sampling 5 --out_dir /home/s2889898/Diss/pensim_mcpilco/pensim_mcpilco/results/cluster/full/ConcCost/dual_phase/No_time/priors/seed{SEED}_2"
+  "python experiments/03_mcpilco_dual_phase_baseline.py --seed {SEED} --num_trials 10 --cost_function PeniConcentrationDenseCost --num_high_feed_probes --num_explorations 1 --t_sampling 5 --out_dir /home/s2889898/Diss/pensim_mcpilco/pensim_mcpilco/results/cluster/full/ConcCost/dual_phase/No_time/probes/seed{SEED}_2"
+  # "python experiments/03_mcpilco_dual_phase_baseline_time.py --seed {SEED} --num_trials 10 --cost_function PeniConcentrationDenseCost --t_sampling 5 --out_dir /home/s2889898/Diss/pensim_mcpilco/pensim_mcpilco/results/cluster/full/ConcCost/dual_phase/Added_time/seed{SEED}_3"
 )
 
 # Appended to EVERY variant above, after its own args -- optional, for flags you don't want to
