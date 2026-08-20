@@ -43,6 +43,8 @@ from mcpilco.config_dual_phase import get_config as _dual_cfg
 from mcpilco.config_dual_phase_baseline import get_config as _dual_baseline_cfg
 from mcpilco.config_dual_phase_baseline_time import get_config as _dual_baseline_time_cfg
 from mcpilco.config_dual_phase_baseline_priors import get_config as _dual_baseline_priors_cfg
+from mcpilco.config_single_phase_absolute import get_config as _single_absolute_cfg
+from mcpilco.config_single_phase_absolute_time import get_config as _single_absolute_time_cfg
 
 _RESULTS = Path(_ROOT) / "results"
 
@@ -56,6 +58,20 @@ SETUPS = {
     "dual_phase_baseline":        (multi_lib,  _dual_baseline_cfg,        "dual_phase_baseline"),
     "dual_phase_baseline_time":   (multi_lib,  _dual_baseline_time_cfg,   "dual_phase_baseline_time"),
     "dual_phase_baseline_priors": (multi_lib,  _dual_baseline_priors_cfg, "dual_phase_baseline_priors"),
+    # Absolute-action single-phase arms (see mcpilco/config_single_phase_absolute.py). This
+    # script's per-episode held-out sweep is encoding-agnostic -- it re-rolls saved policies
+    # through whatever wrapper the config builds -- but the config MUST be the matching absolute
+    # one: an absolute run's note.txt carries action_mode/fs_abs_*, so a residual get_config
+    # raises TypeError rather than silently re-simulating under the wrong action semantics.
+    #
+    # ONE behavioural note, additive entries notwithstanding: the bare-run-id branch of _resolve
+    # below scans EVERY tree in this table, so once results/single_phase_absolute[_time]/ exists
+    # a bare id present in both it and an older tree now reports "exists in multiple setups;
+    # pass --setup" where it previously resolved silently. That is the table's intended
+    # disambiguation and it fails loudly rather than picking the wrong tree -- but it is the one
+    # way adding these rows can change an existing command's behaviour.
+    "single_phase_absolute":      (single_lib, _single_absolute_cfg,      "single_phase_absolute"),
+    "single_phase_absolute_time": (single_lib, _single_absolute_time_cfg, "single_phase_absolute_time"),
 }
 
 

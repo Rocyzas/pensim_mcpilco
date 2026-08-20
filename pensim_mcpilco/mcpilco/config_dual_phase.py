@@ -15,7 +15,8 @@ from mcpilco.penicillin_cost import (PeniConcentrationCost, PeniConcentrationDen
                                      PeniConcentrationChangeCost, PeniMassTerminalCost,
                                      PeniMassChangeCost)
 
-from mcpilco.model_learning_dual_phase import DualPhaseModelLearning
+from mcpilco.model_learning_dual_phase import (DualPhaseModelLearning, BM_PIVOT_DEFAULT,
+                                               BLEND_HALF_WIDTH_BM_DEFAULT)
 from mcpilco.pensim_wrapper import (STATE_DIM,
                                     ACTION_DIM,
                                     T_SAMPLING,
@@ -53,7 +54,9 @@ def get_config(seed=1, num_trials=10, fast=False, dtype=torch.float64, device=to
                pivot_hours=PIVOT_HOURS, blend_half_width_hours=BLEND_HALF_WIDTH_HOURS,
                risk_weight=0.0, visc_penalty=0.02, harvest_reward=True, constraint_strength=0.75,
                pms_visc_delay=False, use_offline_measurements=False, cost_function=None,
-               num_explorations=None, num_high_feed_probes=0, high_feed_levels=(0.6, 0.8, 1.0)):
+               num_explorations=None, num_high_feed_probes=0, high_feed_levels=(0.6, 0.8, 1.0),
+               pivot_mode="time", pivot_bm=BM_PIVOT_DEFAULT,
+               on_each_rollout=False, blend_half_width_bm=BLEND_HALF_WIDTH_BM_DEFAULT):
     """Dual-phase config: same policy/cost/exploration as config_single_phase.get_config, but
     f_model_learning is DualPhaseModelLearning -- two independent Model_learning_RBF_det_time
     instances, each with the SAME per-channel init as the single-phase model, fit on disjoint
@@ -71,6 +74,14 @@ def get_config(seed=1, num_trials=10, fast=False, dtype=torch.float64, device=to
     """
     torch.manual_seed(seed)
     np.random.seed(seed)
+
+    # Validate here as well as in DualPhaseModelLearning.__init__: the model is only constructed
+    # AFTER the driver has already written note.txt and created the run directory, so catching
+    # it there alone leaves an orphan result dir for a run that never started.
+    if on_each_rollout and pivot_mode != "biomass":
+        raise ValueError(
+            f"on_each_rollout=True requires pivot_mode='biomass' (got {pivot_mode!r}) -- pass "
+            "--pivot_mode biomass alongside --onEachRollout.")
 
     pivot_step = int(round(pivot_hours / T_SAMPLING))
 
@@ -117,6 +128,14 @@ def get_config(seed=1, num_trials=10, fast=False, dtype=torch.float64, device=to
         "pivot_step": pivot_step,
         "pivot_hours": pivot_hours,
         "blend_half_width_hours": blend_half_width_hours,
+        # Training-split coordinate only; the rollout blend stays on the time sigmoid either way.
+        # "time" (default) is the previous behaviour exactly -- see DualPhaseModelLearning.
+        "pivot_mode": pivot_mode,
+        "pivot_bm": pivot_bm,
+        # --onEachRollout: move the ROLLOUT BLEND onto the biomass coordinate too. Default False
+        # keeps the time sigmoid, i.e. the behaviour of every run predating the flag.
+        "on_each_rollout": on_each_rollout,
+        "blend_half_width_bm": blend_half_width_bm,
         "phase1_par": _phase_model_learning_par(),
         "phase2_par": _phase_model_learning_par(),
         "dtype": dtype, "device": device,

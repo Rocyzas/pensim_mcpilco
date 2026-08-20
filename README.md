@@ -191,3 +191,231 @@ seed3_100 =           - PeniConc  T=2, no prbs,
 ------------
 1. Compare both cost functions (perhaps concentration gives better single/multi comparison)
 2. next, try 2 explorations and 3 probes (assuming the variation in historical batches)
+
+
+
+
+python ../evaluations/test_seed_policies.py --n_eval_seeds 10 --setup single_phase_baseline seed4_01 --results_root ../results/full/MassCost/single-phase/No_time/
+python ../evaluations/test_seed_policies.py --n_eval_seeds 10 --setup single_phase_baseline_time seed4_11 --results_root ../results/full/MassCost/single-phase/Added_time/
+python ../evaluations/test_seed_policies.py --n_eval_seeds 10 --setup dual_phase_baseline seed4_21 --results_root ../results/full/MassCost/multi-phase/No_time/
+python ../evaluations/test_seed_policies.py --n_eval_seeds 10 --setup dual_phase_baseline_time seed4_31 --results_root ../results/full/MassCost/multi-phase/Added_time/
+
+python ../evaluations/evaluations_single_phase_baseline.py seed4_01 --results_root ../results/full/MassCost/single-phase/No_time
+python ../evaluations/evaluations_single_phase_baseline_time.py seed4_11 --results_root ../results/full/MassCost/single-phase/Added_time
+python ../evaluations/evaluations_multi_phase_baseline.py seed4_21 --results_root ../results/full/MassCost/multi-phase/No_time
+python ../evaluations/evaluations_multi_phase_baseline_time.py seed4_31 --results_root ../results/full/MassCost/multi-phase/Added_time
+
+
+python ../evaluations/test_seed_policies.py --n_eval_seeds 10 --setup single_phase_baseline seed5_01 --results_root ../results/full/MassCost/single-phase/No_time
+python ../evaluations/test_seed_policies.py --n_eval_seeds 10 --setup single_phase_baseline_time seed5_11 --results_root ../results/full/MassCost/single-phase/Added_time
+python ../evaluations/test_seed_policies.py --n_eval_seeds 10 --setup dual_phase_baseline seed5_21 --results_root ../results/full/MassCost/multi-phase/No_time
+python ../evaluations/test_seed_policies.py --n_eval_seeds 10 --setup dual_phase_baseline_time seed5_31 --results_root ../results/full/MassCost/multi-phase/Added_time
+
+python ../evaluations/evaluations_single_phase_baseline.py seed5_01 --results_root ../results/full/MassCost/single-phase/No_time
+python ../evaluations/evaluations_single_phase_baseline_time.py seed5_11 --results_root ../results/full/MassCost/single-phase/Added_time
+python ../evaluations/evaluations_multi_phase_baseline.py seed5_21 --results_root ../results/full/MassCost/multi-phase/No_time
+python ../evaluations/evaluations_multi_phase_baseline_time.py seed5_31 --results_root ../results/full/MassCost/multi-phase/Added_time
+
+
+python ../evaluations/test_seed_policies.py --n_eval_seeds 10 --setup single_phase_baseline seed6_01 --results_root ../results/full/MassCost/single-phase/No_time
+python ../evaluations/test_seed_policies.py --n_eval_seeds 10 --setup single_phase_baseline_time seed6_11 --results_root ../results/full/MassCost/single-phase/Added_time
+python ../evaluations/test_seed_policies.py --n_eval_seeds 10 --setup dual_phase_baseline seed6_21 --results_root ../results/full/MassCost/multi-phase/No_time
+python ../evaluations/test_seed_policies.py --n_eval_seeds 10 --setup dual_phase_baseline_time seed6_31 --results_root ../results/full/MassCost/multi-phase/Added_time
+
+python ../evaluations/evaluations_single_phase_baseline.py seed6_01 --results_root ../results/full/MassCost/single-phase/No_time
+python ../evaluations/evaluations_single_phase_baseline_time.py seed6_11 --results_root ../results/full/MassCost/single-phase/Added_time
+python ../evaluations/evaluations_multi_phase_baseline.py seed6_21 --results_root ../results/full/MassCost/multi-phase/No_time
+python ../evaluations/evaluations_multi_phase_baseline_time.py seed6_31 --results_root ../results/full/MassCost/multi-phase/Added_time
+
+
+python ../evaluations/evaluations_multi_phase_baseline.py seed4_2 --results_root ../results/full02/dual_phase/No_time/10expl/
+python ../evaluations/evaluations_multi_phase_baseline.py seed5_2 --results_root ../results/full02/dual_phase/No_time/10expl/
+python ../evaluations/evaluations_multi_phase_baseline.py seed6_2 --results_root ../results/full02/dual_phase/No_time/10expl/
+
+python ../evaluations/evaluations_multi_phase_baseline_priors.py seed4_2 --results_root ../results/full02/dual_phase/No_time/priors/
+python ../evaluations/evaluations_multi_phase_baseline_priors.py seed5_2 --results_root ../results/full02/dual_phase/No_time/priors/
+python ../evaluations/evaluations_multi_phase_baseline_priors.py seed6_2 --results_root ../results/full02/dual_phase/No_time/priors/
+
+python ../evaluations/evaluations_multi_phase_baseline.py seed4_2 --results_root ../results/full02/dual_phase/No_time/probes/
+python ../evaluations/evaluations_multi_phase_baseline.py seed5_2 --results_root ../results/full02/dual_phase/No_time/probes/
+python ../evaluations/evaluations_multi_phase_baseline.py seed6_2 --results_root ../results/full02/dual_phase/No_time/probes/
+
+
+
+python ../evaluations/action_sensitivity_multi-phase_baseline.py seed4_2 --setup dual_phase_baseline --results_root ../results/full02/dual_phase/No_time/10expl/
+python ../evaluations/action_sensitivity_multi-phase_baseline.py seed5_2 --setup dual_phase_baseline --results_root ../results/full02/dual_phase/No_time/10expl/
+python ../evaluations/action_sensitivity_multi-phase_baseline.py seed6_2 --setup dual_phase_baseline --results_root ../results/full02/dual_phase/No_time/10expl/
+
+python ../evaluations/action_sensitivity_multi-phase_baseline.py seed4_2 --setup dual_phase_baseline_priors --results_root ../results/full02/dual_phase/No_time/priors/
+python ../evaluations/action_sensitivity_multi-phase_baseline.py seed5_2 --setup dual_phase_baseline_priors --results_root ../results/full02/dual_phase/No_time/priors/
+python ../evaluations/action_sensitivity_multi-phase_baseline.py seed6_2 --setup dual_phase_baseline_priors --results_root ../results/full02/dual_phase/No_time/priors/
+
+python ../evaluations/action_sensitivity_multi-phase_baseline.py seed4_2 --setup dual_phase_baseline --results_root ../results/full02/dual_phase/No_time/probes/
+python ../evaluations/action_sensitivity_multi-phase_baseline.py seed5_2 --setup dual_phase_baseline --results_root ../results/full02/dual_phase/No_time/probes/
+python ../evaluations/action_sensitivity_multi-phase_baseline.py seed6_2 --setup dual_phase_baseline --results_root ../results/full02/dual_phase/No_time/probes/
+
+
+
+python ../evaluations/test_seed_policies.py seed4_2 --setup dual_phase_baseline --n_eval_seeds 10 --results_root ../results/full02/dual_phase/No_time/10expl/
+python ../evaluations/test_seed_policies.py seed5_2 --setup dual_phase_baseline --n_eval_seeds 10 --results_root ../results/full02/dual_phase/No_time/10expl/
+python ../evaluations/test_seed_policies.py seed6_2 --setup dual_phase_baseline --n_eval_seeds 10 --results_root ../results/full02/dual_phase/No_time/10expl/
+
+python ../evaluations/test_seed_policies.py seed4_2 --setup dual_phase_baseline_priors --n_eval_seeds 10 --results_root ../results/full02/dual_phase/No_time/priors/
+python ../evaluations/test_seed_policies.py seed5_2 --setup dual_phase_baseline_priors --n_eval_seeds 10 --results_root ../results/full02/dual_phase/No_time/priors/
+python ../evaluations/test_seed_policies.py seed6_2 --setup dual_phase_baseline_priors --n_eval_seeds 10 --results_root ../results/full02/dual_phase/No_time/priors/
+
+python ../evaluations/test_seed_policies.py seed4_2 --setup dual_phase_baseline --n_eval_seeds 10 --results_root ../results/full02/dual_phase/No_time/probes/
+python ../evaluations/test_seed_policies.py seed5_2 --setup dual_phase_baseline --n_eval_seeds 10 --results_root ../results/full02/dual_phase/No_time/probes/
+python ../evaluations/test_seed_policies.py seed6_2 --setup dual_phase_baseline --n_eval_seeds 10 --results_root ../results/full02/dual_phase/No_time/probes/
+
+
+--- ROLLOUTES---
+python 03_mcpilco_dual_phase_baseline.py --seed 4 --num_trials 10 --pivot_mode biomass --cost_function PeniConcentrationDenseCost --results_root ../results/biomass/general/
+python 03_mcpilco_dual_phase_baseline.py --seed 5 --num_trials 10 --pivot_mode biomass --cost_function PeniConcentrationDenseCost --results_root ../results/biomass/general/
+python 03_mcpilco_dual_phase_baseline.py --seed 6 --num_trials 10 --pivot_mode biomass --cost_function PeniConcentrationDenseCost --results_root ../results/biomass/general/
+
+
+python ../evaluations/test_seed_policies.py seed4_1 --setup dual_phase_baseline --n_eval_seeds 10 --results_root ../results/biomass/general/
+python ../evaluations/evaluations_multi_phase_baseline.py seed4_1 --results_root ../results/biomass/general/
+python ../evaluations/action_sensitivity_multi-phase_baseline.py seed4_1 --setup dual_phase_baseline --results_root ../results/biomass/general/ 
+
+python ../evaluations/test_seed_policies.py seed5_1 --setup dual_phase_baseline --n_eval_seeds 10 --results_root ../results/biomass/general/
+python ../evaluations/evaluations_multi_phase_baseline.py seed5_1 --results_root ../results/biomass/general/
+python ../evaluations/action_sensitivity_multi-phase_baseline.py seed5_1 --setup dual_phase_baseline --results_root ../results/biomass/general/ 
+
+python ../evaluations/test_seed_policies.py seed6_1 --setup dual_phase_baseline --n_eval_seeds 10 --results_root ../results/biomass/general/
+python ../evaluations/evaluations_multi_phase_baseline.py seed6_1 --results_root ../results/biomass/general/
+python ../evaluations/action_sensitivity_multi-phase_baseline.py seed6_1 --setup dual_phase_baseline --results_root ../results/biomass/general/ 
+
+
+
+
+python ../evaluations/episode_holdout_multiseed.py \
+../results/full/MassCost/multi-phase/No_time/seed4_21 \
+../results/full/MassCost/multi-phase/No_time/seed5_21 \
+../results/full/MassCost/multi-phase/No_time/seed6_21
+
+
+<!-- SINGLE CONC + MASS YIELD notime/time -->
+python ../evaluations/episode_holdout_two_group.py \
+  --group_a "Time Excluded=../results/full/ConcCost/single-phase/No_time/seed4_0,../results/full/ConcCost/single-phase/No_time/seed5_0,../results/full/ConcCost/single-phase/No_time/seed6_0" \
+  --group_b "Time Added=../results/full/ConcCost/single-phase/Added_time/seed4_1,../results/full/ConcCost/single-phase/Added_time/seed5_1,../results/full/ConcCost/single-phase/Added_time/seed6_1" \
+  --setup_a single_phase_baseline \
+  --setup_b single_phase_baseline_time \
+  --title "Single-Phase on Penicilin Concentration Dense Reward"
+
+
+  python ../evaluations/episode_holdout_two_group.py \
+  --group_a "Time Excluded=../results/full/MassCost/single-phase/No_time/seed4_01,../results/full/MassCost/single-phase/No_time/seed5_01,../results/full/MassCost/single-phase/No_time/seed6_01" \
+  --group_b "Time Added=../results/full/MassCost/single-phase/Added_time/seed4_11,../results/full/MassCost/single-phase/Added_time/seed5_11,../results/full/MassCost/single-phase/Added_time/seed6_11" \
+  --setup_a single_phase_baseline \
+  --setup_b single_phase_baseline_time \
+  --title "Single-Phase on Penicilin Mass Change Reward"
+
+<!-- MULTI CONC + MASS YIELD notime/time -->
+python ../evaluations/episode_holdout_two_group.py \
+  --group_a "Time Excluded=../results/full/ConcCost/multi-phase/No_time/seed4_2,../results/full/ConcCost/multi-phase/No_time/seed5_2,../results/full/ConcCost/multi-phase/No_time/seed6_2" \
+  --group_b "Time Added=../results/full/ConcCost/multi-phase/Added_time/seed4_3,../results/full/ConcCost/multi-phase/Added_time/seed5_3,../results/full/ConcCost/multi-phase/Added_time/seed6_3" \
+  --setup_a dual_phase_baseline \
+  --setup_b dual_phase_baseline_time \
+  --title "Dual-Phase on Penicilin Concentration Dense Reward"
+
+  python ../evaluations/episode_holdout_two_group.py \
+  --group_a "Time Excluded=../results/full/MassCost/multi-phase/No_time/seed4_21,../results/full/MassCost/multi-phase/No_time/seed5_21,../results/full/MassCost/multi-phase/No_time/seed6_21" \
+  --group_b "Time Added=../results/full/MassCost/multi-phase/Added_time/seed4_31,../results/full/MassCost/multi-phase/Added_time/seed5_31,../results/full/MassCost/multi-phase/Added_time/seed6_31" \
+  --setup_a dual_phase_baseline \
+  --setup_b dual_phase_baseline_time \
+  --title "Dual-Phase on Penicilin Mass Change Reward"
+
+
+<!-- BIOMASS PIVOT(S) -->
+python ../evaluations/episode_holdout_two_group.py \
+  --group_a "Biomass Training Ep.=../results/biomass/general/seed4_1,../results/biomass/general/seed5_1,../results/biomass/general/seed6_1" \
+  --group_b "Biomass on every Rollout=../results/biomass/rollout/seed4_1,../results/biomass/rollout/seed5_1,../results/biomass/rollout/seed6_1" \
+  --setup_a dual_phase_baseline \
+  --setup_b dual_phase_baseline_time \
+  --title "Dual-Phase on Penicilin Concentration Dense Reward"
+
+<!-- ABSOLUTE ACTION ( not finished)-->
+python ../evaluations/episode_holdout_two_group.py \
+  --group_a "Without Time=../results/single_phase/absolute/No_time/seed4_1,../results/single_phase/absolute/No_time/seed5_1,../results/single_phase/absolute/No_time/seed6_1" \
+  --group_b "Time Added=../results/single_phase/absolute/Added_time/seed4_1,../results/single_phase/absolute/Added_time/seed5_1,../results/single_phase/absolute/Added_time/seed6_1" \
+  --setup_a single_phase_baseline \
+  --setup_b single_phase_baseline_time \
+  --title "Single-phase with absolute action (no recipe) time vs no time"
+
+
+
+
+<!-- COMPARE MULTI PHASE WITH EXTRAS -->
+python ../evaluations/episode_holdout_multiseed.py \
+  --group "BASELINE=../results/full/ConcCost/multi-phase/No_time/seed4_2,../results/full/ConcCost/multi-phase/No_time/seed5_2,../results/full/ConcCost/multi-phase/No_time/seed6_2" \
+  --group "10 Initial Exploration=../results/full02/dual_phase/No_time/10expl/seed4_2,../results/full02/dual_phase/No_time/10expl/seed5_2,../results/full02/dual_phase/No_time/10expl/seed6_2" \
+  --setup dual_phase_baseline \
+  --title "Different Dual-Phase modifications on Penicilin Concentration Dense Reward"
+  <!-- --group "Mean GP Priors=../results/full02/dual_phase/No_time/priors/seed4_2,../results/full02/dual_phase/No_time/priors/seed5_2,../results/full02/dual_phase/No_time/priors/seed6_2" \ -->
+  <!-- --group "Varying Feeding Probes=../results/full02/dual_phase/No_time/probes/seed4_2,../results/full02/dual_phase/No_time/probes/seed5_2,../results/full02/dual_phase/No_time/probes/seed6_2" \ -->
+  
+
+  
+
+
+
+  <!-- ACTION DEAFNESS TEST -->
+python ../evaluations/action_deafness_margin.py \
+  single_phase_baseline_time=../results/full/ConcCost/single-phase/Added_time/seed4_1 single_phase_baseline=../results/full/ConcCost/single-phase/No_time/seed4_0 \
+  --every_hours 20
+
+<!-- SINGLE CONCENTRATION -->
+python ../evaluations/action_deafness_margin.py \
+  --group_time single_phase_baseline_time=../results/full/ConcCost/single-phase/Added_time/seed4_1 \
+               single_phase_baseline_time=../results/full/ConcCost/single-phase/Added_time/seed5_1 \
+               single_phase_baseline_time=../results/full/ConcCost/single-phase/Added_time/seed6_1 \
+  --group_no_time single_phase_baseline=../results/full/ConcCost/single-phase/No_time/seed4_0 \
+                  single_phase_baseline=../results/full/ConcCost/single-phase/No_time/seed5_0 \
+                  single_phase_baseline=../results/full/ConcCost/single-phase/No_time/seed6_0 \
+  --every_hours 20
+
+<!-- SINGLE MASS -->
+python ../evaluations/action_deafness_margin.py \
+  --group_time single_phase_baseline_time=../results/full/MassCost/single-phase/Added_time/seed4_11 \
+               single_phase_baseline_time=../results/full/MassCost/single-phase/Added_time/seed5_11 \
+               single_phase_baseline_time=../results/full/MassCost/single-phase/Added_time/seed6_11 \
+  --group_no_time single_phase_baseline=../results/full/MassCost/single-phase/No_time/seed4_01 \
+                  single_phase_baseline=../results/full/MassCost/single-phase/No_time/seed5_01 \
+                  single_phase_baseline=../results/full/MassCost/single-phase/No_time/seed6_01 \
+  --every_hours 20
+
+
+
+python ../evaluations/replicate_noise_probe_simple.py \
+../results/full/ConcCost/single-phase/No_time/seed4_0 \
+--setup single_phase_baseline
+
+python ../evaluations/replicate_noise_probe_simple.py \
+../results/full/ConcCost/single-phase/Added_time/seed4_1 \
+--setup single_phase_baseline_time
+
+python ../evaluations/replicate_noise_probe_simple.py \
+../results/full/ConcCost/multi-phase/No_time/seed4_2 \
+--setup dual_phase_baseline
+
+python ../evaluations/replicate_noise_probe_simple.py \
+../results/full/ConcCost/multi-phase/Added_time/seed4_3 \
+--setup dual_phase_baseline_time
+
+
+python ../evaluations/replicate_noise_probe_simple.py \
+../results/full/MassCost/single-phase/No_time/seed4_01 \
+--setup single_phase_baseline
+python ../evaluations/replicate_noise_probe_simple.py \
+../results/full/MassCost/single-phase/Added_time/seed4_11 \
+--setup single_phase_baseline_time
+
+python ../evaluations/replicate_noise_probe_simple.py \
+../results/full/MassCost/multi-phase/No_time/seed4_21 \
+--setup dual_phase_baseline
+
+python ../evaluations/replicate_noise_probe_simple.py \
+../results/full/MassCost/multi-phase/Added_time/seed4_31 \
+--setup dual_phase_baseline_time

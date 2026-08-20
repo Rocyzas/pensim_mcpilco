@@ -55,8 +55,13 @@ def main(run_id, gp_trial=None, n_eval_seeds=5, eval_base=700000, compare_seed=N
     print(f"reconstructed GP model @ trial {gp_idx} | has held-out batch: {has_ho}")
 
     lib.check_blend_weight_sanity(gp_agent, gp_idx, ho_idx, has_ho, out_dir, run.pivot_hours,
-                                  blend_half_width_hours=run.blend_half_width_hours, show=False)
-    lib.check_training_split_sanity(gp_agent, gp_idx, out_dir, run.pivot_hours, show=False)
+                                  blend_half_width_hours=run.blend_half_width_hours, show=False,
+                                  pivot_mode=run.pivot_mode,
+                                  on_each_rollout=run.on_each_rollout, run_for_split=run)
+    lib.check_training_split_sanity(gp_agent, gp_idx, out_dir, run.pivot_hours, show=False,
+                                   pivot_mode=run.pivot_mode, pivot_bm=run.pivot_bm)
+    lib.check_split_distribution(run, out_dir, show=False)
+    lib.check_rollout_pivot_distribution(gp_agent, gp_idx, run, out_dir, show=False)
     lib.check_gp_independence_sanity(gp_agent, gp_idx, out_dir, run.cfg, show=False)
     lib.check_rollout_gradient_flow(gp_agent, gp_idx, out_dir, show=False)
     lib.check_train_eval_blend_consistency(gp_agent, gp_idx, run, out_dir, show=False)
@@ -64,12 +69,15 @@ def main(run_id, gp_trial=None, n_eval_seeds=5, eval_base=700000, compare_seed=N
 
     per_dim_mse, one_step_results = lib.one_step_fit(gp_agent, gp_idx, out_dir, show=False)
     lib.plot_multistep_rollout(gp_agent, gp_idx, ho_idx, has_ho, out_dir, run.pivot_hours,
-                               blend_half_width_hours=run.blend_half_width_hours, show=False)
+                               blend_half_width_hours=run.blend_half_width_hours, show=False,
+                               pivot_mode=run.pivot_mode)
     lib.plot_particle_bands(gp_agent, gp_idx, ho_idx, has_ho, out_dir, run.pivot_hours,
-                            blend_half_width_hours=run.blend_half_width_hours, show=False)
+                            blend_half_width_hours=run.blend_half_width_hours, show=False,
+                            pivot_mode=run.pivot_mode)
     lib.plot_calibration(gp_agent, gp_idx, ho_idx, has_ho, out_dir, show=False)
     lib.plot_local_error(gp_agent, gp_idx, ho_idx, has_ho, out_dir, run.pivot_hours,
-                         blend_half_width_hours=run.blend_half_width_hours, show=False)
+                         blend_half_width_hours=run.blend_half_width_hours, show=False,
+                         pivot_mode=run.pivot_mode)
     lib.plot_kstep_growth(gp_agent, gp_idx, ho_idx, has_ho, out_dir, show=False)
 
     print(f"\n----- DONE: all plots/tables written to {out_dir} -----")

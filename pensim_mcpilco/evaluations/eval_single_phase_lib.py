@@ -42,6 +42,7 @@ if _ROOT not in _sys.path:
 if _os.path.dirname(_ROOT) not in _sys.path:
     _sys.path.insert(0, _os.path.dirname(_ROOT))
 
+from evaluations import torch_cpu_compat  # noqa: F401  -- load GPU-trained runs on a CPU box
 from utils.recipe import Recipe
 from utils.constants import STEP_IN_HOURS
 from PenSimPy.pensimpy.data.constants import FS, FS_DEFAULT_PROFILE
@@ -51,6 +52,7 @@ from mcpilco.pensim_wrapper import (
     PenSimWrapper, PenSimMCPILCO, STATE_NAMES, STATE_DIM, ACTION_DIM,
     STATE_RANGES, decode_state_value, T_SAMPLING, CONTROL_H, K_WARM, VISC_MAX, WARMUP_H,
     PAA_BAND, FS_SCALE, FPAA_MIN, FPAA_MAX, initial_state_norm,
+    FS_ABS_MIN, FS_ABS_MAX,
 )
 from experiments.eval_utils import yield_kg, feasibility_gated_yield_kg, constraint_diagnostics
 
@@ -76,7 +78,14 @@ _GET_CONFIG_KEYS = ("seed", "num_trials", "fast", "optim_horizon_steps", "num_an
                     # through to get_config's own hardcoded defaults in _build_cfg_kwargs below,
                     # which IS what those older runs actually trained with (no setdefault needed,
                     # unlike the two Viscosity-delay flags above).
-                    "cost_function", "num_explorations")
+                    "cost_function", "num_explorations",
+                    # Absolute-action runs only (config_single_phase_absolute[_time]); absent from
+                    # every residual run's note.txt, so nothing older is affected. Carried here so
+                    # a run that narrowed the band on the CLI reconstructs with ITS band rather
+                    # than the config's default. A pleasant side effect: loading an absolute run
+                    # with a RESIDUAL get_config_fn now TypeErrors on the unexpected kwarg instead
+                    # of silently rebuilding the wrapper with the wrong action encoding.
+                    "action_mode", "fs_abs_min", "fs_abs_max")
 
 
 def _build_cfg_kwargs(params):
@@ -545,7 +554,17 @@ def plot_model_vs_recipe_single_seed(eval_wrapper, np_policy, compare_seed, out_
     return fig, m_rl_s, m_recipe_s
 
 
-def plot_fs_residual(m_rl_s, m_recipe_s, compare_seed, out_dir, show=False):
+def plot_fs_residual(m_rl_s, m_recipe_s, compare_seed, out_dir, show=False,
+                     action_mode="residual", fs_abs_min=None, fs_abs_max=None):
+    """A7a (Fs: recipe vs RL) + A7b (the action recovered from the realised Fs).
+
+    A7a is encoding-agnostic. A7b is NOT: recovering the action from Fs means inverting
+    pensim_wrapper.fs_from_action, which differs per action_mode. Pass the run's own
+    `wrapper_par["action_mode"]` (+ band) so the recovered-action panel means what it says --
+    the default reproduces the residual-only behaviour every existing caller relies on. Under
+    "absolute" the Fs_rl/Fs_recipe ratio is still plotted (it reads as "how many times the
+    recipe is this policy feeding"), but it is no longer the quantity the action encodes, so
+    the reference line at 1.0 carries no special meaning there."""
     fig, ax = plt.subplots(figsize=(11, 5))
     ax.plot(m_recipe_s["t"], m_recipe_s["Fs"], label="recipe (baseline)", color="C1")
     ax.plot(m_rl_s["t"], m_rl_s["Fs"], label="RL (loaded policy)", color="C0")
@@ -558,13 +577,20 @@ def plot_fs_residual(m_rl_s, m_recipe_s, compare_seed, out_dir, show=False):
 
     t_fs = np.asarray(m_rl_s["t"])
     ratio = np.asarray(m_rl_s["Fs"]) / np.maximum(np.asarray(m_recipe_s["Fs"]), 1e-9)
-    a_fs = (ratio - 1.0) / FS_SCALE
+    if action_mode == "residual":
+        a_fs = (ratio - 1.0) / FS_SCALE
+    else:
+        lo = FS_ABS_MIN if fs_abs_min is None else fs_abs_min
+        hi = FS_ABS_MAX if fs_abs_max is None else fs_abs_max
+        a_fs = 2.0 * (np.asarray(m_rl_s["Fs"]) - lo) / (hi - lo) - 1.0
 
     fig2, ax2 = plt.subplots(2, 1, figsize=(11, 7), sharex=True)
     ax2[0].plot(t_fs, ratio, color="C0", drawstyle="steps-post")
     ax2[0].axhline(1.0, color="k", lw=1, ls="--")
     ax2[0].set_ylabel("Fs_rl / Fs_recipe")
-    ax2[0].set_title("RL correction factor (each flat step = one decision)")
+    ax2[0].set_title("RL correction factor (each flat step = one decision)"
+                     if action_mode == "residual" else
+                     "Fs_rl / Fs_recipe (absolute action -- ratio is descriptive, not the encoding)")
     ax2[1].plot(t_fs, a_fs, color="C3", drawstyle="steps-post")
     ax2[1].axhline(0.0, color="k", lw=1, ls="--")
     ax2[1].set_ylabel("recovered action a_fs"); ax2[1].set_xlabel("time (h)")

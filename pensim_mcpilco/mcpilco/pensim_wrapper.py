@@ -57,8 +57,9 @@ ACTION_DIM = 1
 # set (X/P were explored earlier but descoped -- see git history if ever wanted again).
 DELAYED_OFFLINE_NAMES = {"Viscosity"}
 
-# STATE_LOG_CHANNELS = {"S", "Wt", "X", "P"}
-STATE_LOG_CHANNELS = {"Wt", "X", "P"}
+# Includes "S": inert for every current STATE_NAMES (none of them carry "S"), only takes effect
+# once a script opts S into STATE_NAMES via set_state_names() -- see that function's docstring.
+STATE_LOG_CHANNELS = {"Wt", "X", "P", "S"}
 STATE_LOG_FLOOR = 1e-6
 
 WARMUP_H = 0
@@ -93,6 +94,57 @@ FPAA_MIN, FPAA_MAX = 0.0, 15.0
 FS_SCALE = 0.5
 # FS_SCALE = 1 #for ceiling test
 
+# Recipe channels treated as NUTRITION, and therefore shifted by rollout(feed_delay_h=...) --
+# an intervention that delays the culture by moving the whole feed programme later, instead of
+# cutting Fs and then jumping back into the middle of the unshifted recipe.
+#
+# Deliberately excluded:
+#   PAA   ctrl_flags.Raman_spec == 2 and rollout sets bypass_paa_pid = False, so a PID drives
+#         PAA to a setpoint of 1200 and the commanded Fpaa is overridden. Shifting it would
+#         look like an intervention while changing essentially nothing.
+#   WATER dilution/evaporation control, not nutrition. Its profile is large and non-monotone
+#         (0 -> 500 @75h -> 100 -> 0 -> 400 @170h) and it drives Wt, a CONSTRAINED variable, so
+#         shifting it would entangle a yield effect with a constraint effect.
+#   FG / PRES / DISCHARGE   plant schedule rather than feed. Holding these on the wall clock is
+#         the whole point: it isolates a delay of the CULTURE from a delay of the operation.
+FEED_CHANNELS = (FS, FOIL)
+
+# Two mutually-exclusive action parameterisations, selected PER PenSimWrapper INSTANCE via
+# `action_mode` (see __init__). Default "residual" is what every run predating this flag used, so
+# nothing that doesn't explicitly opt in changes behaviour.
+#
+#   "residual"  Fs = recipe_Fs(t) * (1 + FS_SCALE * a).  a = 0 IS the recipe, and the action bound
+#               itself confines the policy to a +/-FS_SCALE band around it -- the parameterisation
+#               is doing safety work.
+#   "absolute"  Fs = FS_ABS_MIN + (FS_ABS_MAX - FS_ABS_MIN) * (a + 1) / 2, i.e. feed is free to
+#               fluctuate over the whole [FS_ABS_MIN, FS_ABS_MAX] band and the recipe is NOT
+#               reachable as a single action value (a = 0 is mid-range feed, ~100 L/h by default,
+#               against a recipe that runs 8 L/h at 3h and 80-116 L/h late). Consequences worth
+#               knowing before using it:
+#                 - the policy's reachable set is now much larger than its data support, so the
+#                   optimiser can exploit GP extrapolation; only state_clamp and the cost penalties
+#                   push back.
+#                 - `fs_k` is constant across a whole T_SAMPLING window, so no action sequence
+#                   reproduces the recipe exactly (the profile has 4h resolution before 24h).
+#                 - INCOMPATIBLE with the Wt mass-balance prior mean: wt_mass_balance.py's
+#                   `d_wt = fs_i * (1 + FS_SCALE * a)` hardcodes the residual formula against the
+#                   recipe's integrated feed. Use a plain-RBF config (model_learning_baseline.py),
+#                   which is what config_single_phase_absolute.py asserts.
+ACTION_MODES = ("residual", "absolute")
+FS_ABS_MIN, FS_ABS_MAX = 0.0, 200.0
+
+
+def fs_from_action(a, fs_recipe, action_mode="residual",
+                   fs_abs_min=FS_ABS_MIN, fs_abs_max=FS_ABS_MAX):
+    """Physical substrate feed (L/h) for a normalised action a in [-1, 1]. THE single
+    action->Fs map: PenSimWrapper.rollout calls it, and eval/diagnostic code that needs to go
+    the other way (or shade the reachable band) should invert THIS rather than re-deriving the
+    formula -- see eval_single_phase_lib.py's `a_fs = (ratio - 1) / FS_SCALE`, which is a
+    residual-only inversion and is meaningless under "absolute"."""
+    if action_mode == "residual":
+        return fs_recipe * (1.0 + FS_SCALE * a)
+    return fs_abs_min + (fs_abs_max - fs_abs_min) * (a + 1.0) / 2.0
+
 
 STATE_RANGES = {
 
@@ -105,8 +157,11 @@ STATE_RANGES = {
     # Substrate: fed-batch keeps it near zero (median ~1.6e-3 g/L) but it SPIKES to ~14 g/L under
     # overfeeding -- ~5 orders of magnitude, so it is log-encoded (a linear band would pin the whole
     # operating range at z=-1). The spike is the substrate-accumulation warning that precedes a crash.
-    # "S":         (np.log(STATE_LOG_FLOOR), np.log(20.0)),
-    # "S":         (0, 5),
+    # Upper bound 20 leaves headroom above the ~14 g/L observed spike; lower bound is
+    # STATE_LOG_FLOOR since (unlike X/P below) no reachable-operating-floor measurement for S has
+    # been taken here yet -- re-derive from real batches before trusting resolution near zero.
+    # ONLY used when S is switched into STATE_NAMES via set_state_names() -- see that function.
+    "S":         (np.log(STATE_LOG_FLOOR), np.log(20.0)),
     # Lower bound is the reachable operating floor, NOT STATE_LOG_FLOOR (the encode-clamp used to
     # avoid log(0) when a value is genuinely zero, e.g. P at batch start). Using STATE_LOG_FLOOR=1e-6
     # here made the normalisation range span 17.5 log units while the real production band (X~15-35
@@ -122,6 +177,14 @@ STATE_RANGES = {
     # clamping for. Upper bound 200 leaves headroom above the worst observed batch.
     "Viscosity": (0.0,   120.0),
     "time":      (0.0,   230.0),
+    # Carbon evolution rate: online off-gas, no lab assay and no measurement delay (see
+    # peni_env_setup.py's x.CER, computed from Fg/CO2outgas each native step). Measured over the
+    # 40-batch diagnostic sweep in evaluations/ryu_mu_check: 0.028 at inoculation, median 1.30,
+    # p99 2.25, max 2.27. Linear, NOT log-encoded -- same reasoning as Viscosity: the span is only
+    # ~80x, and the decision-relevant band is the 0.5-2.3 top end where linear gives the better
+    # resolution. Upper bound 2.5 leaves headroom above the worst observed batch.
+    # ONLY used when CER is switched into STATE_NAMES via set_state_names() -- see that function.
+    "CER":       (0.0,   2.5),
 }
 
 # CHANGED_THIS added
@@ -163,6 +226,46 @@ def set_t_sampling(new_t_sampling):
     STEPS_PER_DECISION = int(round(T_SAMPLING / STEP_IN_HOURS))
     PIVOT_STEP = int(round(PIVOT_HOURS / T_SAMPLING))
     TIME_DELTA_NORM = 2.0 * T_SAMPLING / (_t_hi - _t_lo)
+
+
+def set_state_names(new_state_names):
+    """Override STATE_NAMES for the rest of this process, recomputing every derived constant.
+
+    Same import-order contract as set_t_sampling() above, and for exactly the same reason: the
+    channel INDICES are snapshotted at import time by `X_IDX = STATE_NAMES.index("X")`-style
+    module-level statements in penicillin_cost.py (P/WT/VISC/TIME_IDX), wt_mass_balance.py
+    (WT_IDX/TIME_IDX/ACTION_COL), model_learning_det_time.py (WT_GP_IDX/RECIPE_MEAN_GP_IDX) and
+    recipe_trajectory_mean.py (TIME_IDX). So this MUST be called before config_single_phase[
+    _baseline[_time]] / config_dual_phase[...] -- or anything they transitively import -- is
+    imported for the FIRST TIME in this process. See
+    experiments/02_mcpilco_single_phase_baseline_cer.py for the deferred-import pattern.
+
+    APPEND-ONLY. Every existing channel must keep its current position: the indices above are
+    read from the NEW list, but training artefacts, monitor dumps and eval code written against
+    the old layout are not, so reordering silently reinterprets old columns. Enforced below.
+
+    Nothing else needs touching to add a channel: `active_dims`/`lengthscales_init` are built
+    from `gp_input_dim = STATE_DIM + ACTION_DIM` in config_single_phase.py, and x0 mean/variance
+    are MEASURED per-channel by _measure_init_state_stats(), so both pick the new column up
+    automatically. The new name does need a STATE_RANGES entry (checked below) and must be a real
+    PenSimPy batch-data channel, since _read() reaches it via getattr(batch_x, name).
+    """
+    global STATE_NAMES, STATE_DIM, TIME_IDX, VISC_IDX, TIME_DELTA_NORM
+    new_state_names = list(new_state_names)
+    if new_state_names[:len(STATE_NAMES)] != STATE_NAMES:
+        raise ValueError(
+            f"set_state_names is append-only: {new_state_names} does not start with the current "
+            f"{STATE_NAMES}. Reordering or removing channels would silently reinterpret every "
+            f"index baked into penicillin_cost / wt_mass_balance / model_learning_det_time.")
+    missing = [n for n in new_state_names if n not in STATE_RANGES]
+    if missing:
+        raise ValueError(f"no STATE_RANGES entry for {missing}; add one before using it as a state")
+    STATE_NAMES = new_state_names
+    STATE_DIM = len(STATE_NAMES)
+    TIME_IDX = STATE_NAMES.index("time")
+    VISC_IDX = STATE_NAMES.index("Viscosity")
+    _lo, _hi = STATE_RANGES["time"]
+    TIME_DELTA_NORM = 2.0 * T_SAMPLING / (_hi - _lo)
 
 
 INIT_STATE_PHYS = {"T": 297.98, "DO2": 12.33, "O2": 0.189, "CO2outgas": 1.86,
@@ -488,8 +591,22 @@ class _ZOHPolicyProxy:
 class PenSimWrapper:
     """One PenSimPy batch: recipe warmup -> PAA-increment RL control, as MC-PILCO arrays."""
 
-    def __init__(self, seed_offset=0, use_offline_measurements=False, pms_visc_delay=False):
+    def __init__(self, seed_offset=0, use_offline_measurements=False, pms_visc_delay=False,
+                 action_mode="residual", fs_abs_min=FS_ABS_MIN, fs_abs_max=FS_ABS_MAX):
         self.seed_offset = seed_offset
+        # How the normalised action maps to physical Fs -- see ACTION_MODES / fs_from_action
+        # above for the two options and what "absolute" costs you. Instance-level rather than a
+        # module constant on purpose: unlike T_SAMPLING / STATE_NAMES (which are snapshotted at
+        # import time by other modules and so need the set_*() + deferred-import dance), this is
+        # only ever read inside rollout(), so it carries no import-order hazard and two wrappers
+        # with different modes can coexist in one process.
+        if action_mode not in ACTION_MODES:
+            raise ValueError(f"action_mode must be one of {ACTION_MODES}, got {action_mode!r}")
+        if fs_abs_max <= fs_abs_min:
+            raise ValueError(f"fs_abs_max ({fs_abs_max}) must exceed fs_abs_min ({fs_abs_min})")
+        self.action_mode = action_mode
+        self.fs_abs_min = float(fs_abs_min)
+        self.fs_abs_max = float(fs_abs_max)
         # When True, DELAYED_OFFLINE_NAMES channels (currently just Viscosity) in the
         # decision-level state (fed to the GP, cost, and policy alike -- see extract_state)
         # come from the delayed lab-assay proxy instead of the always-available online ODE
@@ -528,7 +645,18 @@ class PenSimWrapper:
             WATER: Recipe(WATER_DEFAULT_PROFILE, WATER), PAA: Recipe(PAA_DEFAULT_PROFILE, PAA),
         })
 
-    def rollout(self, s0, policy, T, dt, noise, seed=None, pid_baseline=False):
+    def rollout(self, s0, policy, T, dt, noise, seed=None, pid_baseline=False,
+                feed_delay_h=0.0):
+        """feed_delay_h > 0 shifts the FEED_CHANNELS recipe profiles later by that many hours,
+        leaving every other channel on the wall clock. Default 0.0 takes the original single
+        -lookup path unchanged, so training and every existing caller are bit-identical.
+
+        Recipe.get_value_at back-fills below its first setpoint, so t - feed_delay_h < 0 needs
+        no guard: it returns the first value (Fs 8 L/h, Foil 22), i.e. the culture is held at
+        the initial feed rate for the first feed_delay_h hours -- minimal but nonzero, delayed
+        rather than starved. It also forward-fills past the last setpoint, so the tail of a
+        shifted batch sits on the final plateau for feed_delay_h hours longer; log cumulative
+        Fs if you need to confirm the disturbance is not quietly adding substrate."""
         env = PenSimEnv(recipe_combo=self._recipe, fast=True)
         if seed is not None:
             np.random.seed(seed)
@@ -554,6 +682,12 @@ class PenSimWrapper:
 
         for k in range(1, NUM_STEPS + 1):
             v = self._recipe.get_values_dict_at(time=k * STEP_IN_HOURS)
+            if feed_delay_h:
+                # Second lookup, feed_delay_h earlier, and only FEED_CHANNELS are taken from it.
+                # Guarded by the truthiness test so feed_delay_h=0.0 keeps the original single
+                # -lookup path byte-for-byte rather than paying for a redundant lookup.
+                vd = self._recipe.get_values_dict_at(time=k * STEP_IN_HOURS - feed_delay_h)
+                v = {**v, **{c: vd[c] for c in FEED_CHANNELS}}
 
             fpaa_k = v[PAA]
             discharge_k = v[DISCHARGE]
@@ -574,7 +708,8 @@ class PenSimWrapper:
                     a_fs = float(action_norm[0])
                     inputs[decision_idx] = action_norm
 
-                fs_k = v[FS] if pid_baseline else v[FS] * (1.0 + FS_SCALE * a_fs)
+                fs_k = v[FS] if pid_baseline else fs_from_action(
+                    a_fs, v[FS], self.action_mode, self.fs_abs_min, self.fs_abs_max)
 
             env.bypass_paa_pid = False
 
@@ -646,6 +781,15 @@ class PenSimMCPILCO(MCP.MC_PILCO):
     # batch across different exploration episodes. The previous linspace+shuffle scheme made
     # level and time-position a strict bijection per episode -- a Monte Carlo check showed that
     # left only a ~47% chance every level got tried in BOTH halves across 5 exploration episodes.
+    #
+    # The name is residual-mode history: this emits levels in [-1, 1] and lets rollout()'s
+    # action_mode decide what they mean, so it needs no change for "absolute" -- there a uniform
+    # draw over [-1, 1] IS a uniform draw over [FS_ABS_MIN, FS_ABS_MAX] held for ~19h, which is
+    # the intended free-feed exploration. Be aware that half that band overfeeds hard (sustained
+    # 200 L/h adds ~61,000 kg over the batch against WT_OVERFLOW = 1.2e5) and the bottom end is
+    # outright starvation, so a large share of exploration batches will collapse -- deliberate
+    # here (the GP needs to see what "too much" does), and nothing screens them out since
+    # FAILED_YIELD_KG / MAX_EXPLORATION_RETRIES are currently disabled above.
     def _recipe_exploration_policy(self, n_seg=12):
         n_decisions = int(CONTROL_H / T_SAMPLING)  # matches PenSimWrapper.rollout's own n_decisions
         base, extra = divmod(n_decisions, n_seg)
@@ -697,7 +841,15 @@ class PenSimMCPILCO(MCP.MC_PILCO):
         """
         seed_offset = self.system.seed_offset
         anchor_policy = lambda state, decision_idx: np.array([0.0])
-        fresh = PenSimWrapper(seed_offset=seed_offset)
+        # action_mode must MATCH self.system's: these trajectories go straight into the GP
+        # training set, so a fresh wrapper left on the default "residual" would record a = 0
+        # against recipe-fed states while an "absolute" agent reads that same column as
+        # mid-range feed -- two action encodings in one training set. (No-op for residual runs,
+        # where the default already matches.) NOTE that under "absolute", a = 0 is mid-range
+        # feed, so these stop being PURE-RECIPE anchors and become constant-mid-feed ones.
+        fresh = PenSimWrapper(seed_offset=seed_offset, action_mode=self.system.action_mode,
+                              fs_abs_min=self.system.fs_abs_min,
+                              fs_abs_max=self.system.fs_abs_max)
 
         np_state = np.random.get_state()
         batch_states = []
@@ -749,7 +901,12 @@ class PenSimMCPILCO(MCP.MC_PILCO):
         collapses under sustained overfeed is precisely the observation the GP is missing.
         """
         seed_offset = self.system.seed_offset
-        fresh = PenSimWrapper(seed_offset=seed_offset)
+        # Same encoding-consistency requirement as setup_recipe_anchors -- see the comment there.
+        # Under "absolute" the PROBE_PLAN shapes are no longer +/- excursions around the recipe
+        # but around mid-range feed (and prod_step_down at level 1.0 is total starvation, Fs = 0).
+        fresh = PenSimWrapper(seed_offset=seed_offset, action_mode=self.system.action_mode,
+                              fs_abs_min=self.system.fs_abs_min,
+                              fs_abs_max=self.system.fs_abs_max)
         n_decisions = int(CONTROL_H / self.T_sampling)
 
         np_state = np.random.get_state()

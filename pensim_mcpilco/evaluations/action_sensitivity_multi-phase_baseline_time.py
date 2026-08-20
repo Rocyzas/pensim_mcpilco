@@ -231,7 +231,27 @@ def _rollout_pert(seed, j, delta, base_level):
     return s_pert
 
 
-def model_action_effect(agent, state_j, delta, j, base_level=0.0):
+def _bm_max0_at(ml, s_base, j):
+    """Running-max biomass over the REAL trajectory up to decision j, for seeding a jump.
+
+    Under --onEachRollout the blend weight is a function of biomass ACCUMULATED SINCE THE START
+    OF THE BATCH, so probing decision j via reset_step_counter(j) -- which is what every helper
+    below does, deliberately, to avoid replaying the whole batch -- starts with an empty running
+    max and would under-weight phase 2 at exactly the late-batch decisions these probes target.
+    DualPhaseModelLearning._blend_weight raises rather than return that silently wrong weight,
+    so the value has to be supplied here. s_base is the real episode's normalised state
+    trajectory, which is exactly what the running max is defined over.
+
+    Returns None (and reset_step_counter then behaves as before) whenever the flag is off, so
+    the time-sigmoid path is untouched."""
+    if not getattr(ml, "on_each_rollout", False):
+        return None
+    from mcpilco.model_learning_dual_phase import _bm_from_states
+    bm = _bm_from_states(np.asarray(s_base)[:j + 1])
+    return torch.tensor([float(np.max(bm))], dtype=ml.dtype, device=ml.device)
+
+
+def model_action_effect(agent, state_j, delta, j, base_level=0.0, bm_max0=None):
     """Queries the DEPLOYED composite at decision j -- reset_step_counter(j) before EACH
     one-off call (baseline and perturbed are independent queries at the same j, not a
     sequential pair) so the phase router answers with whichever phase real rollouts would
@@ -245,14 +265,14 @@ def model_action_effect(agent, state_j, delta, j, base_level=0.0):
     u0 = torch.full((1, ACTION_DIM), a0, dtype=ml.dtype, device=ml.device)
     ud = torch.full((1, ACTION_DIM), ad, dtype=ml.dtype, device=ml.device)
     with torch.no_grad():
-        ml.reset_step_counter(j)
+        ml.reset_step_counter(j, bm_max0=bm_max0)
         ns0, _, _ = ml.get_next_state(current_state=s, current_input=u0, particle_pred=False)
-        ml.reset_step_counter(j)
+        ml.reset_step_counter(j, bm_max0=bm_max0)
         nsd, _, _ = ml.get_next_state(current_state=s, current_input=ud, particle_pred=False)
     return (nsd - ns0)[0].detach().cpu().numpy()
 
 
-def model_rollout(agent, state_j, action_level, n_steps, j):
+def model_rollout(agent, state_j, action_level, n_steps, j, bm_max0=None):
     """Sequential walk starting at decision j -- reset_step_counter(j) ONCE before the loop;
     the composite's own auto-increment then correctly crosses the pivot mid-rollout in exactly
     the way a real deployment rollout would. Clamped to [-1, 1] -- see model_action_effect."""
@@ -261,7 +281,7 @@ def model_rollout(agent, state_j, action_level, n_steps, j):
     a = float(np.clip(action_level, -1.0, 1.0))
     u = torch.full((1, ACTION_DIM), a, dtype=ml.dtype, device=ml.device)
     traj = [s]
-    ml.reset_step_counter(j)
+    ml.reset_step_counter(j, bm_max0=bm_max0)
     with torch.no_grad():
         for _ in range(n_steps):
             s, _, _ = ml.get_next_state(current_state=s, current_input=u, particle_pred=False)
@@ -335,10 +355,13 @@ def action_effect_table(agent, sim_seeds, js, deltas, horizons, pivot_step, base
                 s_base = get_base(seed)
                 s_pert = _rollout_pert(seed, j, delta, base_level)
                 state_j = s_base[j]
+                # Seed the running max from the REAL trajectory: these three calls all jump
+                # straight to decision j (see _bm_max0_at). No-op unless --onEachRollout.
+                bm0 = _bm_max0_at(agent.model_learning, s_base, j)
 
-                model_delta = model_action_effect(agent, state_j, delta, j, base_level)
-                model_base_traj = model_rollout(agent, state_j, base_level, max_h, j)
-                model_pert_traj = model_rollout(agent, state_j, base_level + delta, max_h, j)
+                model_delta = model_action_effect(agent, state_j, delta, j, base_level, bm_max0=bm0)
+                model_base_traj = model_rollout(agent, state_j, base_level, max_h, j, bm_max0=bm0)
+                model_pert_traj = model_rollout(agent, state_j, base_level + delta, max_h, j, bm_max0=bm0)
 
                 for c, idx in zip(CHANNELS, CHANNEL_IDX):
                     td1 = float(s_pert[j + 1, idx] - s_base[j + 1, idx])

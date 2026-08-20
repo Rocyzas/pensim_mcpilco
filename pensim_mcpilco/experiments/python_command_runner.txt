@@ -1,31 +1,36 @@
-python ../evaluations/test_seed_policies.py --n_eval_seeds 10 --setup single_phase_baseline seed4_01 --results_root ../results/full/MassCost/single-phase/No_time/
-python ../evaluations/test_seed_policies.py --n_eval_seeds 10 --setup single_phase_baseline_time seed4_11 --results_root ../results/full/MassCost/single-phase/Added_time/
-python ../evaluations/test_seed_policies.py --n_eval_seeds 10 --setup dual_phase_baseline seed4_21 --results_root ../results/full/MassCost/multi-phase/No_time/
-python ../evaluations/test_seed_policies.py --n_eval_seeds 10 --setup dual_phase_baseline_time seed4_31 --results_root ../results/full/MassCost/multi-phase/Added_time/
+python 02_mcpilco_single_phase_absolute_action.py --seed 4 --num_trials 10 --t_sampling 5 --cost_function PeniConcentrationDenseCost --out_dir ../results/single_phase/absolute/No_time/seed4_1
+python 02_mcpilco_single_phase_absolute_action.py --seed 5 --num_trials 10 --t_sampling 5 --cost_function PeniConcentrationDenseCost --out_dir ../results/single_phase/absolute/No_time/seed5_1
+python 02_mcpilco_single_phase_absolute_action.py --seed 6 --num_trials 10 --t_sampling 5 --cost_function PeniConcentrationDenseCost --out_dir ../results/single_phase/absolute/No_time/seed6_1
 
-python ../evaluations/evaluations_single_phase_baseline.py seed4_01 --results_root ../results/full/MassCost/single-phase/No_time
-python ../evaluations/evaluations_single_phase_baseline_time.py seed4_11 --results_root ../results/full/MassCost/single-phase/Added_time
-python ../evaluations/evaluations_multi_phase_baseline.py seed4_21 --results_root ../results/full/MassCost/multi-phase/No_time
-python ../evaluations/evaluations_multi_phase_baseline_time.py seed4_31 --results_root ../results/full/MassCost/multi-phase/Added_time
+python 02_mcpilco_single_phase_absolute_action_time.py --seed 4 --num_trials 10 --t_sampling 5 --cost_function PeniConcentrationDenseCost --out_dir ../results/single_phase/absolute/Added_time/seed4_1
+python 02_mcpilco_single_phase_absolute_action_time.py --seed 5 --num_trials 10 --t_sampling 5 --cost_function PeniConcentrationDenseCost --out_dir ../results/single_phase/absolute/Added_time/seed5_1
+python 02_mcpilco_single_phase_absolute_action_time.py --seed 6 --num_trials 10 --t_sampling 5 --cost_function PeniConcentrationDenseCost --out_dir ../results/single_phase/absolute/Added_time/seed6_1
 
 
-python ../evaluations/test_seed_policies.py --n_eval_seeds 10 --setup single_phase_baseline seed5_01 --results_root ../results/full/MassCost/single-phase/No_time
-python ../evaluations/test_seed_policies.py --n_eval_seeds 10 --setup single_phase_baseline_time seed5_11 --results_root ../results/full/MassCost/single-phase/Added_time
-python ../evaluations/test_seed_policies.py --n_eval_seeds 10 --setup dual_phase_baseline seed5_21 --results_root ../results/full/MassCost/multi-phase/No_time
-python ../evaluations/test_seed_policies.py --n_eval_seeds 10 --setup dual_phase_baseline_time seed5_31 --results_root ../results/full/MassCost/multi-phase/Added_time
 
-python ../evaluations/evaluations_single_phase_baseline.py seed5_01 --results_root ../results/full/MassCost/single-phase/No_time
-python ../evaluations/evaluations_single_phase_baseline_time.py seed5_11 --results_root ../results/full/MassCost/single-phase/Added_time
-python ../evaluations/evaluations_multi_phase_baseline.py seed5_21 --results_root ../results/full/MassCost/multi-phase/No_time
-python ../evaluations/evaluations_multi_phase_baseline_time.py seed5_31 --results_root ../results/full/MassCost/multi-phase/Added_time
+python ../evaluations/test_seed_policies.py seed4_1 --setup single_phase_absolute --n_eval_seeds 10 --results_root ../results/single_phase/absolute/No_time/
+python ../evaluations/evaluations_single_phase_absolute.py seed4_1 --results_root ../results/single_phase/absolute/No_time/
+python ../evaluations/action_sensitivity_baseline.py seed4_1 --setup single_phase_absolute --results_root ../results/single_phase/absolute/No_time/
+
+python ../evaluations/test_seed_policies.py seed5_1 --setup single_phase_absolute --n_eval_seeds 10 --results_root ../results/single_phase/absolute/No_time/
+python ../evaluations/evaluations_single_phase_absolute.py seed5_1 --results_root ../results/single_phase/absolute/No_time/
+python ../evaluations/action_sensitivity_baseline.py seed5_1 --setup single_phase_absolute --results_root ../results/single_phase/absolute/No_time/
+
+python ../evaluations/test_seed_policies.py seed6_1 --setup single_phase_absolute --n_eval_seeds 10 --results_root ../results/single_phase/absolute/No_time/
+python ../evaluations/evaluations_single_phase_absolute.py seed6_1 --results_root ../results/single_phase/absolute/No_time/
+python ../evaluations/action_sensitivity_baseline.py seed6_1 --setup single_phase_absolute --results_root ../results/single_phase/absolute/No_time/
 
 
-python ../evaluations/test_seed_policies.py --n_eval_seeds 10 --setup single_phase_baseline seed6_01 --results_root ../results/full/MassCost/single-phase/No_time
-python ../evaluations/test_seed_policies.py --n_eval_seeds 10 --setup single_phase_baseline_time seed6_11 --results_root ../results/full/MassCost/single-phase/Added_time
-python ../evaluations/test_seed_policies.py --n_eval_seeds 10 --setup dual_phase_baseline seed6_21 --results_root ../results/full/MassCost/multi-phase/No_time
-python ../evaluations/test_seed_policies.py --n_eval_seeds 10 --setup dual_phase_baseline_time seed6_31 --results_root ../results/full/MassCost/multi-phase/Added_time
 
-python ../evaluations/evaluations_single_phase_baseline.py seed6_01 --results_root ../results/full/MassCost/single-phase/No_time
-python ../evaluations/evaluations_single_phase_baseline_time.py seed6_11 --results_root ../results/full/MassCost/single-phase/Added_time
-python ../evaluations/evaluations_multi_phase_baseline.py seed6_21 --results_root ../results/full/MassCost/multi-phase/No_time
-python ../evaluations/evaluations_multi_phase_baseline_time.py seed6_31 --results_root ../results/full/MassCost/multi-phase/Added_time
+python ../evaluations/test_seed_policies.py seed4_1 --setup single_phase_absolute_time --n_eval_seeds 10 --results_root ../results/single_phase/absolute/Added_time/
+python ../evaluations/evaluations_single_phase_absolute_time.py seed4_1 --results_root ../results/single_phase/absolute/Added_time/
+python ../evaluations/action_sensitivity_baseline_time.py seed4_1 --setup single_phase_absolute_time --results_root ../results/single_phase/absolute/Added_time/
+
+python ../evaluations/test_seed_policies.py seed5_1 --setup single_phase_absolute_time --n_eval_seeds 10 --results_root ../results/single_phase/absolute/Added_time/
+python ../evaluations/evaluations_single_phase_absolute_time.py seed5_1 --results_root ../results/single_phase/absolute/Added_time/
+python ../evaluations/action_sensitivity_baseline_time.py seed5_1 --setup single_phase_absolute_time --results_root ../results/single_phase/absolute/Added_time/
+
+python ../evaluations/test_seed_policies.py seed6_1 --setup single_phase_absolute_time --n_eval_seeds 10 --results_root ../results/single_phase/absolute/Added_time/
+python ../evaluations/evaluations_single_phase_absolute_time.py seed6_1 --results_root ../results/single_phase/absolute/Added_time/
+python ../evaluations/action_sensitivity_baseline_time.py seed6_1 --setup single_phase_absolute_time --results_root ../results/single_phase/absolute/Added_time/
+

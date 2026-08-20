@@ -1,0 +1,2 @@
+delay_h,n_seeds,dual_yield,dual_gated,dual_violations,time_yield,time_gated,time_violations,recipe_yield,recipe_gated,recipe_violations,dual_minus_time,p_raw,dual_minus_time_gated,p_gated
+0.0,10,3908.7502203455783,3578.2898120971236,1,4001.4880178430894,4001.4880178430894,0,3563.451222825798,3563.451222825798,0,-92.73779749751107,0.12512338432551226,-423.19820574596577,0.2465146995176595

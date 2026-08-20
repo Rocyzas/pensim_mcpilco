@@ -52,6 +52,7 @@ if _ROOT not in _sys.path:
 if _os.path.dirname(_ROOT) not in _sys.path:
     _sys.path.insert(0, _os.path.dirname(_ROOT))
 
+from evaluations import torch_cpu_compat  # noqa: F401  -- load GPU-trained runs on a CPU box
 from utils.recipe import Recipe
 from utils.constants import STEP_IN_HOURS
 from PenSimPy.pensimpy.data.constants import FS, FS_DEFAULT_PROFILE
@@ -89,7 +90,15 @@ _GET_CONFIG_KEYS = ("seed", "num_trials", "fast", "pivot_hours", "blend_half_wid
                     # through to get_config's own hardcoded defaults in _build_cfg_kwargs below,
                     # which IS what those older runs actually trained with (no setdefault needed,
                     # unlike the two Viscosity-delay flags above).
-                    "cost_function", "num_explorations", "num_high_feed_probes")
+                    "cost_function", "num_explorations", "num_high_feed_probes",
+                    # Training-split coordinate (see model_learning_dual_phase.py). Absent in
+                    # note.txt for runs predating it -- falling through to get_config's own
+                    # default ("time") is correct there, since that IS what they trained with.
+                    "pivot_mode", "pivot_bm",
+                    # --onEachRollout (rollout blend on biomass). Absent in every
+                    # note.txt predating the flag -> get_config default False ->
+                    # those runs reconstruct with the time sigmoid, as trained.
+                    "on_each_rollout", "blend_half_width_bm")
 
 
 def _build_cfg_kwargs(params):
@@ -167,6 +176,23 @@ class Run:
     @property
     def blend_half_width_hours(self):
         return float(self.params.get("blend_half_width_hours", 40.0))
+
+    @property
+    def pivot_mode(self):
+        """"time" (split every batch at pivot_hours) or "biomass" (split each batch at its own
+        X*Wt crossing). Absent in note.txt for runs predating the flag -- those are all "time"."""
+        return str(self.params.get("pivot_mode", "time"))
+
+    @property
+    def pivot_bm(self):
+        from mcpilco.model_learning_dual_phase import BM_PIVOT_DEFAULT
+        return float(self.params.get("pivot_bm", BM_PIVOT_DEFAULT))
+
+    @property
+    def on_each_rollout(self):
+        """True if the ROLLOUT BLEND (not just the training split) ran on the biomass
+        coordinate. Absent in note.txt for every run predating --onEachRollout -> False."""
+        return str(self.params.get("on_each_rollout", "False")).lower() == "true"
 
 
 def log_state_dims(log):
@@ -313,17 +339,26 @@ def _episode_colorbar(fig, ax, n_ep, n_expl, label="trial (early -> late)"):
     return cb
 
 
-def _mark_pivot(ax, pivot_hours, blend_half_width_hours=None):
+def _mark_pivot(ax, pivot_hours, blend_half_width_hours=None, pivot_mode="time"):
     """Marker at the dual-phase pivot -- the CENTER of the sigmoid blend that combines
     phase-1/phase-2 GP predictions -- on any panel whose x-axis is batch time. When
     blend_half_width_hours is given, also shades the ~1%-99% transition window
-    (pivot +- half_width) so the plot shows a region, not a hard cutoff that no longer exists."""
+    (pivot +- half_width) so the plot shows a region, not a hard cutoff that no longer exists.
+
+    pivot_mode only changes the LABEL, never the geometry: the blend is the time sigmoid centred
+    on pivot_hours in both modes. Under pivot_mode="time" pivot_hours legitimately means two
+    things at once -- the training-split point AND the blend centre -- so the bare word "pivot"
+    is unambiguous. Under "biomass" the split moves to each batch's own X*Wt crossing (see
+    model_learning_dual_phase.py) and pivot_hours means ONLY the blend centre, so labelling this
+    line "pivot" invites reading it as the split point and concluding the biomass split was
+    ignored. Say "blend centre" there instead; C.0a/C.0f report the actual split."""
+    lbl = "blend centre" if pivot_mode == "biomass" else "pivot"
     for a in np.atleast_1d(ax).ravel():
         if blend_half_width_hours is not None:
             a.axvspan(pivot_hours - blend_half_width_hours, pivot_hours + blend_half_width_hours,
                       color="purple", alpha=0.06, zorder=0,
                       label=f"blend window (+-{blend_half_width_hours:g} h)")
-        a.axvline(pivot_hours, color="purple", ls=":", lw=1.2, label=f"pivot ({pivot_hours:g} h)")
+        a.axvline(pivot_hours, color="purple", ls=":", lw=1.2, label=f"{lbl} ({pivot_hours:g} h)")
 
 
 def run_arm(wrapper, seed, policy=None, pid_baseline=False):
@@ -717,7 +752,8 @@ def plot_training_progression(run, ref, ref_lbl, out_dir, show=False):
     ax[1, 2].set_xlabel("episode"); ax[1, 2].set_ylabel("feasibility-gated yield (kg)")
     ax[1, 2].grid(alpha=.3, axis="y")
 
-    _mark_pivot([ax[0, 1], ax[0, 2], ax[1, 0], ax[1, 1]], run.pivot_hours, run.blend_half_width_hours)
+    _mark_pivot([ax[0, 1], ax[0, 2], ax[1, 0], ax[1, 1]], run.pivot_hours,
+                run.blend_half_width_hours, pivot_mode=run.pivot_mode)
     for a in (ax[0, 0], ax[0, 1], ax[0, 2], ax[1, 0], ax[1, 1], ax[1, 2]):
         a.legend(fontsize=6, ncol=2)
 
@@ -748,7 +784,7 @@ def plot_all_observations(run, ref, ref_lbl, out_dir, show=False):
         if name == "PAA":
             a.axhspan(*PAA_BAND, color="green", alpha=.12, label="allowed band")
         a.axvline(WARMUP_H, color="gray", ls=":", lw=.8)
-        _mark_pivot(a, run.pivot_hours, run.blend_half_width_hours)
+        _mark_pivot(a, run.pivot_hours, run.blend_half_width_hours, pivot_mode=run.pivot_mode)
         _lo_p, _hi_p = decode_state_value(name, lo), decode_state_value(name, hi)
         a.set_title(name); a.set_xlabel("time (h)"); a.set_ylabel(f"{name} (range {_lo_p:g}..{_hi_p:g})")
         a.grid(alpha=.3)
@@ -852,8 +888,98 @@ def reconstruct_gp_agent(run, idx=None, get_config_fn=None):
     return agent, idx
 
 
+def _bm_max0_at(ml, states, t0):
+    """Running-max biomass over `states[:t0+1]`, for seeding a jump to decision t0.
+
+    Several diagnostics here deliberately probe decision t0 directly -- reset_step_counter(t0)
+    then one or a few get_next_state calls -- instead of replaying the batch from 0, because
+    they sweep every origin and replaying each would be quadratic. Under --onEachRollout the
+    blend weight is a function of biomass ACCUMULATED SINCE THE START OF THE BATCH, so such a
+    jump starts with an empty running max; DualPhaseModelLearning._blend_weight raises rather
+    than return the resulting under-weighted phase 2 silently. `states` is the real logged
+    trajectory those probes are teacher-forced on, which is exactly what the running max is
+    defined over, so the correct seed is available for free at every call site.
+
+    Returns None -- and reset_step_counter then behaves exactly as before -- whenever the flag
+    is off, so every pre-existing (time / stage-1 biomass) run is untouched."""
+    if not getattr(ml, "on_each_rollout", False):
+        return None
+    from mcpilco.model_learning_dual_phase import _bm_from_states
+    bm = _bm_from_states(states[:t0 + 1])
+    m = float(bm.max()) if torch.is_tensor(bm) else float(np.max(bm))
+    return torch.tensor([m], dtype=ml.dtype, device=ml.device)
+
+
+def _load_split_log(run):
+    """This run's per-trajectory training splits as a DataFrame [step, hours, crossed], or None.
+
+    None covers both legitimate absences: pivot_mode="time" (the split is the constant
+    pivot_step, so the driver writes nothing) and runs trained before the driver dumped
+    split_log.pkl at all. Callers treat None as "no split info available", never as an error.
+    """
+    if run.pivot_mode != "biomass":
+        return None
+    path = Path(run.dir) / "split_log.pkl"
+    if not path.exists():
+        return None
+    with open(path, "rb") as fh:
+        return pd.DataFrame(pickle.load(fh), columns=["step", "hours", "crossed"])
+
+
+def _weights_equal(a, b):
+    """Blend weights compare as plain floats under the time sigmoid and as per-particle tensors
+    under --onEachRollout, so equality needs a type-aware helper: `a == b` on two tensors yields
+    a tensor, and bool() of that raises for anything but a 1-element result."""
+    if torch.is_tensor(a) or torch.is_tensor(b):
+        return (torch.is_tensor(a) and torch.is_tensor(b)
+                and a.shape == b.shape and bool(torch.equal(a, b)))
+    return a == b
+
+
+def _fmt_weight(w):
+    return f"{float(w.reshape(-1)[0]):.6f}" if torch.is_tensor(w) else f"{w:.6f}"
+
+
+def _weights_along_rollout(ml, S, U, dtype, device, n_rows=1, particle_pred=False):
+    """Every (decision_step, weight) `_blend_weight` computes while walking ONE deterministic
+    rollout from S[0] under the recorded inputs U.
+
+    Needed because under --onEachRollout the weight is no longer a pure function of the decision
+    index -- it depends on the biomass the rollout has actually accumulated -- so it cannot be
+    sampled by calling _blend_weight on a bare time grid. Two consequences that make an external
+    call outright WRONG there, not merely uninformative: _blend_weight requires current_state
+    (it raises without one), and it MUTATES ml._bm_max, so calling it outside get_next_state
+    would double-advance the running max and corrupt the very rollout being measured.
+
+    Recording from inside the real get_next_state loop sidesteps both, and gives the identical
+    answer under the time sigmoid, where the weight ignores the state entirely."""
+    calls = []
+    orig = ml._blend_weight
+
+    def _rec(t_step, current_state=None):
+        w = orig(t_step, current_state)
+        # clone: the tensor returned under --onEachRollout is ml._bm_max-derived and would
+        # otherwise alias state that later steps overwrite.
+        calls.append((t_step, w.detach().clone() if torch.is_tensor(w) else w))
+        return w
+
+    x = torch.tensor(np.tile(np.asarray(S)[0], (n_rows, 1)), dtype=dtype, device=device)
+    ml._blend_weight = _rec
+    try:
+        ml.reset_step_counter(0)
+        with torch.no_grad():
+            for t in range(1, np.asarray(S).shape[0]):
+                u = torch.tensor(np.asarray(U)[t - 1:t], dtype=dtype, device=device).expand(n_rows, -1)
+                x, _, _ = ml.get_next_state(current_state=x, current_input=u,
+                                            particle_pred=particle_pred)
+    finally:
+        ml._blend_weight = orig
+    return calls
+
+
 def check_blend_weight_sanity(gp_agent, gp_idx, ho_idx, has_ho, out_dir,
-                              pivot_hours, blend_half_width_hours, show=False):
+                              pivot_hours, blend_half_width_hours, show=False,
+                              pivot_mode="time", on_each_rollout=False, run_for_split=None):
     """C.0 -- blend-weight sanity check for DualPhaseModelLearning's sigmoid phase blend.
 
     _blend_weight(t_step) is a pure function of (t_step, pivot_hours, blend_half_width_hours,
@@ -896,7 +1022,28 @@ def check_blend_weight_sanity(gp_agent, gp_idx, ho_idx, has_ho, out_dir,
     for c, (bidx, tag) in enumerate(cols):
         T = np.asarray(gp_agent.state_samples_history[bidx]).shape[0]
         t_ = decision_time_grid(T)
-        raw_w2 = np.array([gp_agent.model_learning._blend_weight(t) for t in range(T)])
+        if on_each_rollout:
+            # The weight depends on accumulated biomass, not on t, so it has to be READ OFF a
+            # real rollout rather than sampled on a time grid (see _weights_along_rollout).
+            # Deterministic single-row walk, matching C.0d's, so the two agree by construction.
+            _rec = _weights_along_rollout(
+                gp_agent.model_learning,
+                gp_agent.state_samples_history[bidx], gp_agent.input_samples_history[bidx],
+                gp_agent.dtype, gp_agent.device)
+            _by_step = {t: float(np.reshape(w.cpu().numpy() if torch.is_tensor(w) else w, -1)[0])
+                        for t, w in _rec}
+            # The walk makes T-1 get_next_state calls, so it records decision steps 0..T-2; the
+            # final step T-1 is a state the rollout arrives at but never predicts FROM, so no
+            # weight is computed for it. Forward-fill rather than defaulting it to 0 -- a zero
+            # there is a spurious drop at the end of an otherwise monotone series, which trips
+            # both the monotonicity check (ii) and the phase-2 pure-window search (iii).
+            _last, raw_w2 = 0.0, []
+            for _t in range(T):
+                _last = _by_step.get(_t, _last)
+                raw_w2.append(_last)
+            raw_w2 = np.array(raw_w2)
+        else:
+            raw_w2 = np.array([gp_agent.model_learning._blend_weight(t) for t in range(T)])
         raw_w1 = 1.0 - raw_w2
         eff_w2 = np.where(raw_w2 <= _BLEND_SKIP_EPS, 0.0,
                           np.where(raw_w2 >= 1.0 - _BLEND_SKIP_EPS, 1.0, raw_w2))
@@ -944,21 +1091,53 @@ def check_blend_weight_sanity(gp_agent, gp_idx, ho_idx, has_ho, out_dir,
         a.plot(t_, eff_w1, "--", color="C0", lw=1.2, alpha=.7, label="phase1 weight (effective)")
         a.plot(t_, eff_w2, "--", color="C1", lw=1.2, alpha=.7, label="phase2 weight (effective)")
         a.axhline(0.95, color="grey", ls=":", lw=1)
-        _mark_pivot(a, pivot_hours, blend_half_width_hours)
+        _mark_pivot(a, pivot_hours, blend_half_width_hours, pivot_mode=pivot_mode)
         a.set_ylim(-0.05, 1.05); a.set_xlabel("time (h)"); a.set_ylabel("blend weight")
         a.set_title(f"{tag} (batch {bidx})", fontsize=9); a.grid(alpha=.3)
         if c == 0:
             a.legend(fontsize=7, loc="center left")
-    fig.suptitle(f"C.0 — blend-weight sanity — pivot={pivot_hours:g}h "
+    # Under pivot_mode="biomass" this check is UNCHANGED by design -- stage 1 moves only the
+    # training split, not the rollout blend -- so C.0 looks identical to a time-mode run and has
+    # been misread as "the biomass pivot was ignored". Say so on the figure and in the .txt.
+    _blend_lbl = ("blend centre" if pivot_mode == "biomass" else "pivot")
+    fig.suptitle(f"C.0 — blend-weight sanity — {_blend_lbl}={pivot_hours:g}h "
                 f"+-{blend_half_width_hours:g}h — model@trial {gp_idx}")
     fig.tight_layout()
     _finish(fig, out_dir, "C0_blend_weight_sanity.png", show)
     pd.DataFrame(rows).to_csv(Path(out_dir) / "C0_blend_weight_sanity.csv", index=False)
+    # Where this run's TRAINING data was actually split, printed next to the blend window above.
+    # Without it the two live in different files and the stage-1 mismatch reads as a
+    # contradiction: the blend window is identical across seeds (it is a pure function of
+    # pivot_hours/blend_half_width_hours) while the splits genuinely differ per seed and per
+    # trajectory. Seeing both on one page is the whole diagnosis.
+    _sl = _load_split_log(run_for_split) if run_for_split is not None else None
+    if _sl is not None and len(_sl):
+        _h = _sl["hours"].to_numpy(dtype=float)
+        _gap = pivot_hours - float(np.median(_h))
+        summary_lines.append(
+            f"training split (this run, {len(_h)} trajectories): median {np.median(_h):.1f}h, "
+            f"range [{_h.min():.1f}, {_h.max():.1f}]h\n"
+            + (f"  blend centre is {pivot_hours:g}h -- {_gap:+.1f}h vs the median split; phase 1 "
+               f"holds majority weight past the end of its own training data"
+               if not on_each_rollout else
+               f"  blend now tracks each rollout's own biomass, so it follows these splits "
+               f"rather than the {pivot_hours:g}h clock"))
+
+    # Stage-1 only. Under --onEachRollout the blend is NOT the time sigmoid, so this note would
+    # be actively wrong there -- the windows above are then read off a real rollout and DO move.
+    if pivot_mode == "biomass" and not on_each_rollout:
+        summary_lines.append(
+            "NOTE (pivot_mode=biomass): the numbers above describe the ROLLOUT BLEND ONLY, which\n"
+            "is the time sigmoid centred on pivot_hours in BOTH modes -- so this check is expected\n"
+            "to look identical to a pivot_mode=time run. It is NOT evidence the biomass split was\n"
+            "ignored. The training split is per-batch and reported in C0a_training_split_sanity\n"
+            "(look for overlapping phase1/phase2 TIME ranges) and C0f_split_distribution.")
     (Path(out_dir) / "C0_blend_weight_sanity.txt").write_text("\n\n".join(summary_lines) + "\n")
     return fig
 
 
-def check_training_split_sanity(gp_agent, gp_idx, out_dir, pivot_hours, show=False):
+def check_training_split_sanity(gp_agent, gp_idx, out_dir, pivot_hours, show=False,
+                                pivot_mode="time", pivot_bm=None):
     """C.0a -- training-DATA assignment sanity check for DualPhaseModelLearning.
 
     Separate concern from check_blend_weight_sanity (C.0), which only checks the ROLLOUT-time
@@ -987,24 +1166,70 @@ def check_training_split_sanity(gp_agent, gp_idx, out_dir, pivot_hours, show=Fal
     pivot_hours=95.5h with T_SAMPLING=5h rounds to step 19 -> phase1 ends at 90.2h, phase2
     starts at 95.2h -- a clean one-T_SAMPLING-step gap, not a leak, even though 95.2 < 95.5).
     Comparing against pivot_hours directly would misfire on every run whose pivot isn't an
-    exact multiple of T_SAMPLING."""
+    exact multiple of T_SAMPLING.
+
+    pivot_mode="biomass": TIME-disjointness is the WRONG invariant and this check switches
+    coordinates rather than reporting a spurious FAIL. Each batch is split at its own X*Wt
+    crossing, so a batch splitting at 40h and another at 95h put phase1 rows as late as 95h
+    alongside phase2 rows as early as 40h -- the time ranges genuinely overlap, and that
+    overlap IS the feature. The invariant that must still hold is in BIOMASS space: every
+    phase1 input row was taken before its own trajectory's running max reached pivot_bm, so
+    (running max being monotone and >= the raw value) every phase1 row must have raw
+    BM < pivot_bm. Phase2 rows carry no matching bound -- the raw signal peaks ~134h and
+    declines, so a phase2 row legitimately dips back below pivot_bm -- hence phase2 is
+    reported for information only, not asserted on."""
     time_col = STATE_NAMES.index("time")
     lo_t, hi_t = STATE_RANGES["time"]
     rows = []
     summary_lines = []
+    from mcpilco.model_learning_dual_phase import _bm_from_states, BM_PIVOT_DEFAULT
+    pivot_bm = BM_PIVOT_DEFAULT if pivot_bm is None else float(pivot_bm)
     for name, sub in [("phase1", gp_agent.model_learning.phase1),
                       ("phase2", gp_agent.model_learning.phase2)]:
         gi = sub.gp_inputs.detach().cpu().numpy() if torch.is_tensor(sub.gp_inputs) else np.asarray(sub.gp_inputs)
         t_hours = decode_state_value("time", _denorm(gi[:, time_col], lo_t, hi_t))
         n = int(gi.shape[0])
         t_min, t_max = float(t_hours.min()), float(t_hours.max())
-        rows.append({"phase": name, "n_points": n, "time_min_h": t_min, "time_max_h": t_max})
+        # gp_inputs rows are [state..., action], so the state columns _bm_from_states needs
+        # (X, Wt) are present and correctly positioned -- slice them off the action column.
+        bm = _bm_from_states(gi[:, :len(STATE_NAMES)])
+        rows.append({"phase": name, "n_points": n, "time_min_h": t_min, "time_max_h": t_max,
+                     "bm_min": float(bm.min()), "bm_max": float(bm.max()),
+                     "frac_bm_below_pivot": float((bm < pivot_bm).mean())})
 
     p1, p2 = rows[0], rows[1]
     tol = 1e-6
-    disjoint = p1["time_max_h"] < p2["time_min_h"] - tol
     gap_h = p2["time_min_h"] - p1["time_max_h"]
     nominal_step = round(pivot_hours / T_SAMPLING) * T_SAMPLING
+
+    if pivot_mode == "biomass":
+        # See docstring: assert in biomass space, report time overlap as expected, not a leak.
+        disjoint = p1["frac_bm_below_pivot"] > 1.0 - 1e-9
+        line = (
+            f"[training split sanity | model@trial {gp_idx}, pivot_mode=biomass, "
+            f"pivot_bm={pivot_bm:g}]\n"
+            f"  phase1: n={p1['n_points']} points, time [{p1['time_min_h']:.2f}, "
+            f"{p1['time_max_h']:.2f}]h, BM [{p1['bm_min']:.0f}, {p1['bm_max']:.0f}]\n"
+            f"  phase2: n={p2['n_points']} points, time [{p2['time_min_h']:.2f}, "
+            f"{p2['time_max_h']:.2f}]h, BM [{p2['bm_min']:.0f}, {p2['bm_max']:.0f}]\n"
+            f"  time ranges overlap by {max(0.0, -gap_h):.2f}h -- EXPECTED under a biomass "
+            f"split (each batch is cut at its own crossing, so a late-crossing batch "
+            f"contributes phase1 rows later than an early-crossing batch's phase2 rows)\n"
+            f"  phase1 rows with BM < pivot_bm: {100*p1['frac_bm_below_pivot']:.2f}% "
+            f"(must be 100% -- every phase1 row predates its own trajectory's crossing)\n"
+            f"  phase2 rows with BM < pivot_bm: {100*p2['frac_bm_below_pivot']:.2f}% "
+            f"(informational: the raw signal peaks ~134h then declines, so dips back below "
+            f"are expected and are NOT a leak)\n"
+            f"  -> {'PASS (biomass-space split is clean)' if disjoint else 'FAIL (phase1 contains rows at/above pivot_bm)'}"
+        )
+        print(line)
+        summary_lines.append(line)
+        df = pd.DataFrame(rows)
+        df.to_csv(Path(out_dir) / "C0a_training_split_sanity.csv", index=False)
+        (Path(out_dir) / "C0a_training_split_sanity.txt").write_text("\n".join(summary_lines) + "\n")
+        return df
+
+    disjoint = p1["time_max_h"] < p2["time_min_h"] - tol
 
     line = (
         f"[training split sanity | model@trial {gp_idx}, pivot_hours={pivot_hours:g}h "
@@ -1025,6 +1250,167 @@ def check_training_split_sanity(gp_agent, gp_idx, out_dir, pivot_hours, show=Fal
     df.to_csv(Path(out_dir) / "C0a_training_split_sanity.csv", index=False)
     (Path(out_dir) / "C0a_training_split_sanity.txt").write_text("\n".join(summary_lines) + "\n")
     return df
+
+
+def check_split_distribution(run, out_dir, show=False):
+    """C.0f -- WHERE the per-batch training split actually landed (pivot_mode="biomass" only).
+
+    C.0a proves the split is CLEAN (no biomass-space leak); this reports its DISTRIBUTION, which
+    is what tells you whether the biomass pivot did anything interesting. Under pivot_mode="time"
+    the split is the constant pivot_step in every batch, so there is nothing to plot -- returns
+    None and writes no files.
+
+    Reads split_log.pkl (written by the 03_mcpilco_dual_phase_baseline.py driver from
+    DualPhaseModelLearning._split_log). Absent for runs trained before that dump existed, in
+    which case this reports that and returns None rather than failing the whole eval.
+
+    The number to watch is `n_fallback`: trajectories whose biomass never reached pivot_bm, which
+    silently fall back to the fixed pivot_step (see _biomass_pivot_step). A handful is fine -- a
+    stunted batch genuinely never enters the production regime -- but a large count means
+    pivot_bm is set too high and most batches are being split on the clock after all, which would
+    make a biomass-vs-time A/B compare two nearly identical things."""
+    if run.pivot_mode != "biomass":
+        return None
+    df = _load_split_log(run)
+    if df is None:
+        print(f"[split distribution] no split_log.pkl in {run.dir.name} "
+              f"(trained before the dump existed) -- skipping C.0f")
+        return None
+    hrs = df["hours"].to_numpy(dtype=float)
+    n_fb = int((~df["crossed"]).sum())
+    cv = float(hrs.std() / abs(hrs.mean())) if hrs.mean() else float("nan")
+
+    line = (
+        f"[split distribution | {run.dir.name}, pivot_mode=biomass, pivot_bm={run.pivot_bm:g}]\n"
+        f"  {len(df)} trajectories split at: median {np.median(hrs):.1f}h, "
+        f"range [{hrs.min():.1f}, {hrs.max():.1f}]h, CV {cv:.3f}\n"
+        f"  (a pivot_mode=time run would show every trajectory at the same "
+        f"{run.pivot_hours:g}h, CV 0)\n"
+        f"  never crossed pivot_bm, fell back to the fixed pivot_step: {n_fb}/{len(df)}"
+        f"{'  <-- pivot_bm may be set too high' if n_fb > 0.25 * len(df) else ''}"
+    )
+    print(line)
+    df.to_csv(Path(out_dir) / "C0f_split_distribution.csv", index=False)
+    (Path(out_dir) / "C0f_split_distribution.txt").write_text(line + "\n")
+
+    fig, ax = plt.subplots(1, 2, figsize=(11, 3.6))
+    ax[0].hist(hrs, bins=min(20, max(5, len(hrs) // 2)), color="purple", alpha=.65)
+    ax[0].axvline(run.pivot_hours, color="k", ls="--", lw=1.4,
+                  label=f"fixed pivot would be {run.pivot_hours:g}h")
+    ax[0].set_xlabel("training-split time (h)"); ax[0].set_ylabel("trajectories")
+    ax[0].set_title("Where each batch was actually split"); ax[0].legend(fontsize=8)
+    ax[0].grid(alpha=.3)
+    ax[1].plot(np.arange(len(hrs)), hrs, marker="o", ms=3, lw=1, color="purple")
+    ax[1].axhline(run.pivot_hours, color="k", ls="--", lw=1.4)
+    ax[1].set_xlabel("trajectory (order added to the GP training set)")
+    ax[1].set_ylabel("split time (h)")
+    ax[1].set_title("Split time over training"); ax[1].grid(alpha=.3)
+    fig.suptitle(f"C.0f — biomass training-split distribution — {run.dir.name} "
+                 f"(pivot_bm={run.pivot_bm:g})")
+    fig.tight_layout()
+    _finish(fig, out_dir, "C0f_split_distribution.png", show)
+    return df
+
+
+def check_rollout_pivot_distribution(gp_agent, gp_idx, run, out_dir, n_particles=None, show=False):
+    """C.0g -- WHERE EACH IMAGINED ROLLOUT crosses the pivot (--onEachRollout only).
+
+    Distinct from both neighbours, and the gap between them is the point of this check:
+      * C.0f reports the TRAINING split -- one number per real logged trajectory, from add_data.
+      * C.0  reports the ROLLOUT blend along a single DETERMINISTIC walk -- one curve.
+      * this reports the rollout blend across N PARTICLES of one imagined rollout, i.e. the
+        spread the policy optimiser actually sees.
+
+    That spread is the quantity --onEachRollout exists to create: under the time sigmoid every
+    particle crosses at the same hour by construction (CV 0), so a run whose particles all still
+    cross together has gained nothing from the flag and pivot_bm is probably mis-placed for the
+    policy's operating point.
+
+    Returns None and writes nothing under pivot_mode="time" or without --onEachRollout, where
+    the answer is degenerate by construction."""
+    if not run.on_each_rollout:
+        return None
+    if n_particles is None:
+        # The run's OWN particle count, not a constant that happens to be nearby: this measures
+        # the spread the policy optimiser actually saw, so sampling it with a different number of
+        # particles than training used would under- (or over-) resolve exactly the quantity being
+        # reported. Same read-back-from-cfg discipline the drivers use for note.txt.
+        n_particles = int(run.cfg.get("reinforce_par", {})
+                             .get("policy_optimization_dict", {})
+                             .get("num_particles", 200))
+    ml = gp_agent.model_learning
+    S = np.asarray(gp_agent.state_samples_history[gp_idx])
+    U = np.asarray(gp_agent.input_samples_history[gp_idx])
+    T = S.shape[0]
+
+    # Particle rollout, recording the FULL per-particle weight vector at every step (the
+    # deterministic single-row walk C.0/C.0d use would collapse exactly the spread of interest).
+    calls = []
+    orig = ml._blend_weight
+
+    def _rec(t_step, current_state=None):
+        w = orig(t_step, current_state)
+        calls.append((t_step, w.detach().clone() if torch.is_tensor(w) else w))
+        return w
+
+    x = torch.tensor(np.tile(S[0], (n_particles, 1)), dtype=gp_agent.dtype, device=gp_agent.device)
+    ml._blend_weight = _rec
+    try:
+        ml.reset_step_counter(0)
+        torch.manual_seed(0)
+        with torch.no_grad():
+            for t in range(1, T):
+                u = torch.tensor(U[t - 1:t], dtype=gp_agent.dtype,
+                                 device=gp_agent.device).expand(n_particles, -1)
+                x, _, _ = ml.get_next_state(current_state=x, current_input=u, particle_pred=True)
+    finally:
+        ml._blend_weight = orig
+
+    steps = np.array([t for t, _ in calls])
+    W = np.stack([np.broadcast_to(np.asarray(w.cpu()) if torch.is_tensor(w) else np.asarray(w),
+                                  (n_particles,)) for _, w in calls])          # (n_steps, n_part)
+    hours = steps * T_SAMPLING
+    # first step at which each particle's weight reaches 0.5 -- the weight is monotone in the
+    # running max, so the first crossing is well defined and needs no smoothing.
+    crossed = W >= 0.5
+    has = crossed.any(axis=0)
+    idx = np.where(has, crossed.argmax(axis=0), -1)
+    t_cross = np.where(has, hours[np.clip(idx, 0, len(hours) - 1)], np.nan)
+    ok = np.isfinite(t_cross)
+    cv = float(np.nanstd(t_cross) / abs(np.nanmean(t_cross))) if ok.any() else float("nan")
+
+    line = (
+        f"[rollout pivot distribution | model@trial {gp_idx}, batch {gp_idx}, "
+        f"{n_particles} particles, pivot_bm={run.pivot_bm:g}]\n"
+        f"  particles crossing w=0.5: {int(ok.sum())}/{n_particles}\n"
+        f"  crossing time: median {np.nanmedian(t_cross):.1f} h, "
+        f"range [{np.nanmin(t_cross):.1f}, {np.nanmax(t_cross):.1f}] h, CV {cv:.3f}\n"
+        f"  (a time-sigmoid run would put EVERY particle at {run.pivot_hours:g} h, CV 0)\n"
+        f"  never crossed (stay on phase 1 all batch): {int((~ok).sum())}"
+        f"{'   <-- phase 1 has no training data that late; pivot_bm likely too high' if (~ok).sum() else ''}"
+    )
+    print(line)
+    pd.DataFrame({"particle": np.arange(n_particles), "t_cross_h": t_cross}).to_csv(
+        Path(out_dir) / "C0g_rollout_pivot_distribution.csv", index=False)
+    (Path(out_dir) / "C0g_rollout_pivot_distribution.txt").write_text(line + "\n")
+
+    fig, ax = plt.subplots(1, 2, figsize=(11.5, 3.8))
+    ax[0].hist(t_cross[ok], bins=min(25, max(5, int(ok.sum()) // 8)), color="purple", alpha=.7)
+    ax[0].axvline(run.pivot_hours, color="k", ls="--", lw=1.4,
+                  label=f"time sigmoid would be {run.pivot_hours:g} h")
+    ax[0].set_xlabel("w=0.5 crossing time (h)"); ax[0].set_ylabel("particles")
+    ax[0].set_title("Per-particle pivot, one imagined rollout"); ax[0].legend(fontsize=8)
+    ax[0].grid(alpha=.3)
+    lo, med, hi = np.nanpercentile(W, [5, 50, 95], axis=1)
+    ax[1].fill_between(hours, lo, hi, color="purple", alpha=.25, label="5-95th pct")
+    ax[1].plot(hours, med, color="purple", lw=2, label="median")
+    ax[1].axhline(0.5, color="grey", ls=":", lw=1)
+    ax[1].set_xlabel("batch time (h)"); ax[1].set_ylabel("phase-2 weight")
+    ax[1].set_title("Weight spread across particles"); ax[1].legend(fontsize=8); ax[1].grid(alpha=.3)
+    fig.suptitle(f"C.0g — per-rollout pivot spread — {run.dir.name}")
+    fig.tight_layout()
+    _finish(fig, out_dir, "C0g_rollout_pivot_distribution.png", show)
+    return t_cross
 
 
 def check_gp_independence_sanity(gp_agent, gp_idx, out_dir, cfg, show=False):
@@ -1224,12 +1610,33 @@ def check_rollout_gradient_flow(gp_agent, gp_idx, out_dir, N=20, show=False):
     x = torch.tensor(np.tile(S[0], (N, 1)), dtype=dtype, device=device)
     ml.reset_step_counter(0)
     phase1_calls, phase2_calls = 0, 0
-    for t in range(1, T):
-        w = ml._blend_weight(t - 1)
-        phase1_calls += int(w < 1.0 - _BLEND_SKIP_EPS)
-        phase2_calls += int(w > _BLEND_SKIP_EPS)
-        u = action_probe[t - 1:t, :].expand(N, -1)
-        x, _, _ = ml.get_next_state(current_state=x, current_input=u, particle_pred=True)
+
+    # The per-phase call counts are RECORDED from inside get_next_state rather than recomputed
+    # by calling _blend_weight externally. Under --onEachRollout an external call is not just
+    # uninformative but actively harmful: _blend_weight needs current_state and MUTATES
+    # ml._bm_max, so an extra call per step would double-advance the running max and change the
+    # very rollout whose gradient flow is being measured. Recording gives the identical counts
+    # under the time sigmoid, where the weight is state-independent.
+    _orig_bw = ml._blend_weight
+
+    def _counting_blend_weight(t_step, current_state=None):
+        nonlocal phase1_calls, phase2_calls
+        w = _orig_bw(t_step, current_state)
+        w_max = float(w.max()) if torch.is_tensor(w) else w
+        w_min = float(w.min()) if torch.is_tensor(w) else w
+        # "phase N was evaluated at this step" -- mirrors get_next_state's own skip shortcut,
+        # which under --onEachRollout requires unanimity across particles.
+        phase1_calls += int(w_max < 1.0 - _BLEND_SKIP_EPS)
+        phase2_calls += int(w_min > _BLEND_SKIP_EPS)
+        return w
+
+    ml._blend_weight = _counting_blend_weight
+    try:
+        for t in range(1, T):
+            u = action_probe[t - 1:t, :].expand(N, -1)
+            x, _, _ = ml.get_next_state(current_state=x, current_input=u, particle_pred=True)
+    finally:
+        ml._blend_weight = _orig_bw
     loss = (x ** 2).sum()
     loss.backward()
 
@@ -1331,9 +1738,13 @@ def check_train_eval_blend_consistency(gp_agent, gp_idx, run, out_dir, show=Fals
     calls = []
     orig_blend_weight = ml._blend_weight
 
-    def _recording_blend_weight(t_step):
-        w = orig_blend_weight(t_step)
-        calls.append((t_step, w))
+    def _recording_blend_weight(t_step, current_state=None):
+        # Must accept current_state: get_next_state passes it under --onEachRollout (and omits
+        # it otherwise), so a one-argument wrapper would TypeError there. Forwarding it
+        # unconditionally is safe -- _blend_weight ignores it under the time sigmoid.
+        w = orig_blend_weight(t_step, current_state)
+        # clone, or every recorded entry would alias the same running-max tensor.
+        calls.append((t_step, w.detach().clone() if torch.is_tensor(w) else w))
         return w
 
     S = np.asarray(gp_agent.state_samples_history[gp_idx])
@@ -1363,13 +1774,23 @@ def check_train_eval_blend_consistency(gp_agent, gp_idx, run, out_dir, show=Fals
         ml._blend_weight = orig_blend_weight
 
     same_len = len(w_policy_style) == len(w_eval_style)
-    identical = same_len and w_policy_style == w_eval_style
+    # Bit-identity is still the right bar under --onEachRollout: both loops start from the SAME
+    # S[0], replay the SAME recorded inputs U, run deterministically (particle_pred=False) and
+    # reset the step counter first (PenSimMCPILCOMultiPhase.rollout overrides do so), so the two
+    # state trajectories -- and hence the state-dependent weights -- must coincide exactly. Only
+    # the COMPARISON needs to be type-aware, because the weight is a tensor there.
+    identical = same_len and all(
+        ta == tb and _weights_equal(wa, wb)
+        for (ta, wa), (tb, wb) in zip(w_policy_style, w_eval_style))
     lines.append(f"(c) weight-sequence length: policy-opt-shaped loop={len(w_policy_style)} calls, "
                 f"agent.rollout()={len(w_eval_style)} calls -> {'PASS' if same_len else 'FAIL'}")
     if same_len and not identical:
-        mismatches = [(a, b) for a, b in zip(w_policy_style, w_eval_style) if a != b]
+        mismatches = [(a, b) for a, b in zip(w_policy_style, w_eval_style)
+                      if not (a[0] == b[0] and _weights_equal(a[1], b[1]))]
+        (ta, wa), (tb, wb) = mismatches[0]
         lines.append(f"(d) per-step (decision_step, weight) pairs identical -> FAIL, "
-                    f"{len(mismatches)}/{len(w_policy_style)} mismatches, first: {mismatches[0]}")
+                    f"{len(mismatches)}/{len(w_policy_style)} mismatches, first: "
+                    f"step {ta} w={_fmt_weight(wa)} vs step {tb} w={_fmt_weight(wb)}")
     else:
         lines.append(f"(d) per-step (decision_step, weight) pairs identical, bit-for-bit -> "
                     f"{'PASS' if identical else 'FAIL'}")
@@ -1475,8 +1896,9 @@ def _kstep_errors(agent, batch_idx, horizons, target_origins=60):
     for t0 in range(0, T - 1, stride):
         steps = min(kmax, T - 1 - t0)
         cur = true[t0:t0 + 1, :]
-        ml.reset_step_counter(t0)  # dual-phase: route decisions t0, t0+1, ... through
-                                    # whichever phase actually owns them
+        ml.reset_step_counter(t0, bm_max0=_bm_max0_at(ml, true, t0))
+        # dual-phase: route decisions t0, t0+1, ... through whichever phase actually owns them;
+        # bm_max0 supplies the biomass this jump skipped over (see _bm_max0_at).
         for j in range(1, steps + 1):
             cur, _, _ = ml.get_next_state(current_state=cur,
                                           current_input=inp[t0 + j - 1:t0 + j, :],
@@ -1553,7 +1975,7 @@ def one_step_fit(gp_agent, gp_idx, out_dir, show=False):
 
 
 def plot_multistep_rollout(gp_agent, gp_idx, ho_idx, has_ho, out_dir, pivot_hours,
-                           blend_half_width_hours=None, show=False):
+                           blend_half_width_hours=None, show=False, pivot_mode="time"):
     with torch.no_grad():
         pred, true, _ = gp_agent.get_rollout_prediction_performance(gp_idx)
         if has_ho:
@@ -1584,7 +2006,7 @@ def plot_multistep_rollout(gp_agent, gp_idx, ho_idx, has_ho, out_dir, pivot_hour
     ax[1].set_title("Multi-step P: in-sample vs held-out")
     ax[1].set_xlabel("time (h)"); ax[1].set_ylabel("P (g/L)"); ax[1].grid(alpha=.3)
 
-    _mark_pivot(ax, pivot_hours, blend_half_width_hours)
+    _mark_pivot(ax, pivot_hours, blend_half_width_hours, pivot_mode=pivot_mode)
     for a in ax:
         a.legend(fontsize=7)
     fig.suptitle(f"GP-vs-simulator multi-step diagnostic — model@trial {gp_idx}"
@@ -1621,7 +2043,7 @@ def _particle_rollout(agent, idx, N=100, seed=0):
 
 
 def plot_particle_bands(gp_agent, gp_idx, ho_idx, has_ho, out_dir, pivot_hours,
-                        blend_half_width_hours=None, n_part=100, show=False):
+                        blend_half_width_hours=None, n_part=100, show=False, pivot_mode="time"):
     with torch.no_grad():
         pred, _, _ = gp_agent.get_rollout_prediction_performance(gp_idx)
     cols = [(gp_idx, "IN-SAMPLE", pred)]
@@ -1653,7 +2075,7 @@ def plot_particle_bands(gp_agent, gp_idx, ho_idx, has_ho, out_dir, pivot_hours,
             a.plot(t_, truth, "k-", lw=1.8, label="simulator (truth)")
             a.plot(t_, mline, "C1--", lw=1.8, label="GP mean rollout")
             a.plot(t_, p50, "C0-", lw=1.5, label="GP particle median")
-            _mark_pivot(a, pivot_hours, blend_half_width_hours)
+            _mark_pivot(a, pivot_hours, blend_half_width_hours, pivot_mode=pivot_mode)
             a.set_xlim(*xlim); a.set_ylim(lo_p - pad, hi_p + pad)
             a.set_title(f"{name} - {tag} (batch {bidx})", fontsize=9)
             a.set_ylabel(name, fontsize=8); a.grid(alpha=.3); a.tick_params(labelsize=7)
@@ -1686,7 +2108,7 @@ def _one_step_std_residuals(agent, batch_idx):
     z = np.full((N - 1, STATE_DIM), np.nan)
     with torch.no_grad():
         for t0 in range(N - 1):
-            ml.reset_step_counter(t0)
+            ml.reset_step_counter(t0, bm_max0=_bm_max0_at(ml, tr, t0))
             nxt, _dmean, dvar = ml.get_next_state(current_state=tr[t0:t0 + 1, :],
                                                   current_input=ip[t0:t0 + 1, :], particle_pred=False)
             std = torch.sqrt(dvar).ravel()
@@ -1734,7 +2156,7 @@ def _one_step_abs_err(agent, batch_idx):
     errs = np.full((N - 1, STATE_DIM), np.nan)
     with torch.no_grad():
         for t0 in range(N - 1):
-            ml.reset_step_counter(t0)
+            ml.reset_step_counter(t0, bm_max0=_bm_max0_at(ml, tr, t0))
             nxt, _, _ = ml.get_next_state(current_state=tr[t0:t0 + 1, :],
                                           current_input=ip[t0:t0 + 1, :], particle_pred=False)
             errs[t0] = (nxt - tr[t0 + 1:t0 + 2, :]).abs().ravel().detach().cpu().numpy()
@@ -1744,7 +2166,7 @@ def _one_step_abs_err(agent, batch_idx):
 
 
 def plot_local_error(gp_agent, gp_idx, ho_idx, has_ho, out_dir, pivot_hours,
-                     blend_half_width_hours=None, show=False):
+                     blend_half_width_hours=None, show=False, pivot_mode="time"):
     t_in, eX_in, eP_in = _one_step_abs_err(gp_agent, gp_idx)
     if has_ho:
         t_ho, eX_ho, eP_ho = _one_step_abs_err(gp_agent, ho_idx)
@@ -1768,7 +2190,7 @@ def plot_local_error(gp_agent, gp_idx, ho_idx, has_ho, out_dir, pivot_hours,
         a.set_title(f"One-step |error| vs batch time — {name}")
         a.set_xlabel("batch time at prediction origin (h)"); a.set_ylabel(f"one-step |error| ({name}, g/L)")
         a.grid(alpha=.3); a.legend(fontsize=7)
-    _mark_pivot(ax, pivot_hours, blend_half_width_hours)
+    _mark_pivot(ax, pivot_hours, blend_half_width_hours, pivot_mode=pivot_mode)
     fig.suptitle("Local (one-step) GP error across the batch")
     fig.tight_layout()
     _finish(fig, out_dir, "C5_local_error.png", show)

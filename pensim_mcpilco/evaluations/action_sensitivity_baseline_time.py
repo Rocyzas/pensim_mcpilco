@@ -36,6 +36,8 @@ if _os.path.dirname(_ROOT) not in _sys.path:
 import evaluations.eval_single_phase_lib as lib
 from mcpilco.config_single_phase_baseline import get_config as _no_time_get_config
 from mcpilco.config_single_phase_baseline_time import get_config as _time_get_config
+from mcpilco.config_single_phase_absolute import get_config as _abs_no_time_get_config
+from mcpilco.config_single_phase_absolute_time import get_config as _abs_time_get_config
 from mcpilco.pensim_wrapper import (PenSimWrapper, STATE_NAMES, STATE_DIM, ACTION_DIM,
                                     CONTROL_H, T_SAMPLING, TIME_IDX)
 
@@ -46,10 +48,21 @@ from mcpilco.pensim_wrapper import (PenSimWrapper, STATE_NAMES, STATE_DIM, ACTIO
 SETUPS = {
     "single_phase_baseline":      _no_time_get_config,
     "single_phase_baseline_time": _time_get_config,
+    # Absolute-action arms (see mcpilco/config_single_phase_absolute.py). Purely ADDITIVE: the
+    # two entries above are untouched, and this file's analysis is encoding-agnostic -- it
+    # sweeps the NORMALISED [-1, 1] action input and never converts it to L/h (no FS_SCALE
+    # anywhere here), so the same report code serves both action parameterisations. The config
+    # choice only controls which wrapper/GP-input set load_run rebuilds, and for an absolute run
+    # it MUST be one of these two or load_run raises TypeError on the action_mode kwarg its
+    # note.txt carries (see eval_single_phase_lib._GET_CONFIG_KEYS).
+    "single_phase_absolute":      _abs_no_time_get_config,
+    "single_phase_absolute_time": _abs_time_get_config,
 }
 DEFAULT_RESULTS_ROOT = {
     "single_phase_baseline":      Path(_ROOT) / "results" / "single_phase_baseline",
     "single_phase_baseline_time": Path(_ROOT) / "results" / "single_phase_baseline_time",
+    "single_phase_absolute":      Path(_ROOT) / "results" / "single_phase_absolute",
+    "single_phase_absolute_time": Path(_ROOT) / "results" / "single_phase_absolute_time",
 }
 DEFAULT_SETUP = "single_phase_baseline_time"
 
