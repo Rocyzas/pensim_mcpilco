@@ -1,146 +1,172 @@
-TODO:
+# Data-efficient Reinforcement Learning for Non-stationary Fed-batch Processes
 
-Decide on:
-1. Observation, State space
-- State: a reduced (to make FP tractable) and physically-motivated (biomass, substrate, dissolved oxygen, pH, viscosity, penicillin conc, plus phase indicator), according to the Goldrick's mechanistic models (IndPenSim)
-- Answers: "What dimensionality reduction tradeoffs (in terms of total yield or cost) in GP compared to DRL models"
+MSc Dissertation — University of Edinburgh, School of Informatics, 2026  
+**Rokas Pranevičius**.
 
-2. Action space
-- what's actually controllable on a real plant at the timescale Im modeling (pH and temperature regulated by PIDs)
-- probably will need: substrate feed rate and aeration/agitation.
+Supervised by **Prof. Christopher Lucas**
 
-3. For multi-phase use same observational state but control differnt actions (see and justify which actions are more important during each phase).
-- not confirmed, but: 
-    - Growth (biomass accumulation) - substrate feed rate, aeration, and temperature/pH setpoints 
-    - Production (additional levers like precursor (e.g., phenylacetic acid) feed rate), and substrate feed rate is not as important (not confirmed)
+---
 
-GENERALISABILITY
-4. Decide on what is structural vs paramteric
-- Structural: phase detector, per phase dynamics GP models, policy(s)
-- Parametric (organism specific): bounds, different variables, initial conditions, reward weighting
+## Overview
 
-*genelaise how to obtain the parameters and not the parameters themselves* 
+This repository contains the implementation for an MSc dissertation adapting **MC-PILCO** to optimise a non-stationary fed-batch penicillin fermentation process.
 
-- find a second simple organism to show generalisability
-Question - which actions/states to chose?
+Two research questions investigated:
 
+**RQ1** -- Can MC-PILCO be adapted to reliably improve penicillin yield in a fed-batch simulator under severe data constraints.
 
-PHASE SWITCH
-1. unsupervised change-point detection on the dynamics
+**RQ2** -- Does explicitly modelling the growth/production phase transition as two independently trained GP dynamics models (dual-GP) improve upon a single GP.
 
+---
 
+## Key Results
 
-# Variables
-Raman enables (3 per paper): PAA (phenylacetic acid), X, P concentration.
-    + Substrate (S) and Viscosity (vis).
+| Method | Mean \delta Yield (kg) | SD across seeds | Violations (30 batches) |
+|---|---|---|---|
+| Recipe (baseline) | — | — | 0/10 |
+| Bayesian Optimisation (15 evals) | +158.7 | +-193.8 | 4/30 |
+| MC-PILCO, no time | +148.9 | +-45.0 | 0/30 |
+| MC-PILCO, time added | +387.5 | +-56.5 | 1/30 |
 
-1. PID controlled: pH, Temperature, PAA concentration (disabling and controlling as RL agent action)
-    PAA concentration is on only when Raman is on, so I am disabling the `bypass_paa_pid` flag for now and controlling it manually.
+---
 
-2. Observable without Raman: 
-- ONLINE: T, ph, DO2, O2, CO2outgas, Wt (vessel wright), pressure, agitator RPM, all flow rates
-- OFFLINE: P, X, PAA, NH3, Viscosity (without raman observed with Lab samples only every 12h.)
+## Repository Structure
 
-3. Actions
-- Fs (sugar feed), Foil, Fg (aeration feed), head pressure, F_discharge, Fw (water for dillution), Fpaa (PAA feed), NH3_shots (ammonia shots)
+```
+pensim_mcpilco/
+├── pensim_mcpilco/        # Main package
+│   ├── env/               # PenSimPy environment wrapper
+│   ├── gp/                # GP dynamics models
+│   ├── policy/
+│   ├── pilco/             # MC-PILCO algorithm
+│   ├── costs/             # Reward functions (including the ones not used)
+│   └── notebooks/         # Experiments
+├── simple_runner.sh       # bash file for cluster
+├── run.sh                 # bash file for cluster
+└── README.md
+```
 
-# Decision on variables with justification
-ACTIONS:
-1. BO baseline uses 6: DISCHARGE, FS, FOIL, FG, PRES, WATER, FPAA (excluded)
+---
 
+## Environment
 
+The simulator is **PenSimPy** ([Zhang, 2020](https://github.com/Mohan-Zhang-u/PenSimPy)).
 
-<!-- COMPARISON  -  SEEDS -->
-Comparison is made in the @03_compare ipynb notebook
+**State space** (4 variables + optional time):
+Biomass X (g/L), Penicillin P (g/L), Vessel weight Wt (kg), Viscosity (cP), Time (h) (optional).
 
-1. Agent RNG seed (torch/numpy, global RNG) - controls learning algorithm's randomness, which is policy weight initialisation, particle sampling, dropout
-2. Batch seed (PenSimEnv random_seed_ref) - physical fermentation realisation, which is initial conditions, kinetics, disturbances.
+P and X are assumed online-observable via Raman spectroscopy with chemometric calibration.
 
+**Action**: Residual correction on the substrate feed rate Fs, bounded at +-50% of the recipe setpoint:
 
+```
+u_t = recipe_t * (1 + 0.5 * a_t),   a_t ∈ [-1, 1]
+```
 
-FLAGS TO REMOVE:
-1. Fixed seed on the rollout()
-2. T_SAMPLING 5.0
-3. 
+This residual parameterisation improves safety and data efficiency by keeping the agent close to a near-optimal industrial recipe.
 
+---
 
-THINGS IMPLEMENTED:
-1. Initial explorations ignore the failed batches. Although failed batches due to control are okay for GP inputs, the ones that failed due to physics should be discarded (such as Vis>100 etc). Some failures are detected in real time using multivariate statistical process control (as per paper).
-2. Included ONLY states that are affected by my Fs control: X, P, Wt, (S is not available). And added time.
-3. X, P, Wt are clamped, log-encoded and then normalised.
+## Algorithm
 
+MC-PILCO ([Amadio et al., 2022](https://doi.org/10.1109/TRO.2022.3184837)) propagates particles through a GP dynamics model and estimates the policy gradient by Monte Carlo.
 
+**Dual-GP extension**: two independently trained GPs (growth phase, production phase) blended via a logistic sigmoid centred on the phase pivot, with combined variance accounting for between-phase spread. Three pivot types tested: morphological (fixed, ~100 h), biomass-weight proxy (adaptive per episode), and per-rollout particle-level.
 
-sbatch run.sh --visc_penalty 0.0 --no_harvest_reward --risk_weight 0.0 --seed 11 --out_dir /home/s2889898/Diss/pensim_mcpilco/pensim_mcpilco/results/cluster/full/seed11_0 --num_trials 11
+---
 
-sbatch run.sh --visc_penalty 0.5 --no_harvest_reward --risk_weight 0.0 --seed 11 --out_dir /home/s2889898/Diss/pensim_mcpilco/pensim_mcpilco/results/cluster/full/seed11_1 --num_trials 11
+## Installation
 
-sbatch run.sh --visc_penalty 0.0 --risk_weight 0.0 --seed 11 --out_dir /home/s2889898/Diss/pensim_mcpilco/pensim_mcpilco/results/cluster/full/seed11_2 --num_trials 11
+```bash
+git clone https://github.com/Rocyzas/pensim_mcpilco.git
+cd pensim_mcpilco
+pip install -e .
+```
 
-sbatch run.sh --visc_penalty 0.5 --risk_weight 0.0 --seed 11 --out_dir /home/s2889898/Diss/pensim_mcpilco/pensim_mcpilco/results/cluster/full/seed11_3 --num_trials 11
+**Dependencies**: Python 3.9+, PyTorch, GPyTorch, PenSimPy, NumPy, pandas, Matplotlib, SciPy.
 
-sbatch run.sh --visc_penalty 0.5 --risk_weight 0.01 --seed 11 --out_dir /home/s2889898/Diss/pensim_mcpilco/pensim_mcpilco/results/cluster/full/seed11_4 --num_trials 11
+---
 
+## Usage
 
-seed3_5 - rbf of V,X,P
-seed2_32 - rbf on none
-seed3_6 - rbf on none, num_min_diff_cost=25
-seed3_7 - rbf on V,X,P, num_min_diff_cost=25 - very good yield, only one -600, --risk_weight 0.01
-seed3_8 - rbf on V,X,P(fix), num_min_diff_cost=25 + --num_high_feed_probes 3 --risk_weight 0.01 - decreased yield
-finding out what decreased yield running, 
+**Single run:**
 
-seed3_12 - rbf on V,X,P(fix), num_min_diff_cost=25 --risk_weight 0.01
-    32 skipped
-seed2_33 (same as above but different seed)
-seed2_33 PeniConcentrationCost
-seed2_34 PeniMassChangeCost
+```bash
+bash simple_runner.sh \
+  --seed 3 \
+  --out_dir results/run_seed3 \
+  --num_trials 10 \
+  --visc_penalty 0.5 \
+  --risk_weight 0.01
+```
 
-seed2_35 same as 34, but removed --risk_weight.
-seed2_36 same as 34, but increased --risk_weight to 0.05
+**Key flags:**
 
-seed2_37 - run after the feedback changes.
+| Flag | Description | Default |
+|---|---|---|
+| `--seed` | Training seed (controls policy init and particle sampling) | 3 |
+| `--num_trials` | Number of policy-search trials | 10 |
+| `--visc_penalty` | Weight on viscosity constraint penalty | 0.5 |
+| `--risk_weight` | Weight on particle spread penalty | 0.01 |
+| `--add_time` | Include time as GP input | False |
+| `--dual_gp` | Enable dual-GP phase decomposition | False |
+| `--phase_pivot` | Phase pivot type: `morphological`, `biomass`, `rollout` | `morphological` |
+| `--num_high_feed_probes` | Number of high-feed exploration probes | 0 |
+| `--out_dir` | Output directory for results and plots | `results/` |
 
-seed3_13 - new fix, identical with seed3_7 for comparison if fix did the job
-    rollouts greit krenta, yield is good.
-seed3_14 - identical with seed3_13 for comparison if 1. fix of 'Ranges + flg_norm + remove lengthscale cap' worked
-    code changes + flg_norm
-seed3_15 - identical with seed3_14 just with the flag_norm=False
-    THIS IMPROVED THE norms, GP predictions, and yield!!!
-    one problem left is that P is not sensitive enough.
-seed3_16 - checking if adding '--num_high_feed_probes 3' would fix the P sensitivity.
-    Watch two numbers: P's spread/σ_n ratio, and the model/true ratio at j=8, a=+1.0. If that ratio moves from 0.03 toward 0.3+, data was the binding constraint.
-seed3_17 - same as 3_16, but now with Lagged actions (EMA of past actions to the state).
-    did not fix the issue, i need to fix the The identified collinearity.
-seed3_18 same but with a collinearlity fix
-seed3_19 had the fix for Viscosity penalty ramp, Viscosity GP inputs 
+---
 
-seed3_20 now has the fix for the action_rate penalty (uncommented) - GOOD yield
-    so basically everything the same but with action_rate penalty enabled
+## Experimental Design
 
-seed3_31 - changed the reward function to PeniMassChangeCost. - checking different cost function
-seed4_2 - PeniConcentrationCost, seed 4. Same as before. checking generalisability.
+- **Training**: 3 seeds * 10 policy-search trials per configuration
+- **Evaluation**: 10 held-out batch seeds per training seed (30 seed * batch evaluations per configuration)
+- **Baseline**: Bayesian Optimisation with +-50% recipe residual Fs control, switching every 25 h
+- **Primary metric**: total penicillin yield (kg), reported as \delta relative to the recipe baseline of the same seed
+- **Constraint metrics**: peak viscosity >100 cP and vessel weight >1.1*10^4 kg
 
-seed3_24 - PeniMassChangeCost cost, changed T_sampling=2
-seed3_26 - ALL yields above. T_sampling 5, more epochs tho.
+Seeds are shared across all methods to allow paired statistical comparisons.
 
-Added DO2
-seed3_9 - rbf on V,X,P(fix), num_min_diff_cost=25 + --num_high_feed_probes 3
+---
 
+## Reproducibility Notes
 
+- PenSimPy diverges numerically from the MATLAB IndPenSim implementation due to solver differences (SciPy LSODA vs MATLAB ODE solver) and recipe setpoint reading. This implementation follows MATLAB behaviour (`right_sp` at each breakpoint) as it is verified by multiple published studies.
+- Historical IndPenSim batches cannot be reused and must be regenerated under this simulator version.
+- Results are not directly comparable to published IndPenSim benchmarks using the MATLAB implementation.
 
-removed EMAn state
-seed3_30 and 31 differs in cost function only. Both achieve above yield, both rollouts are good
-    Masschange seems to be more realiable but not much increase
-    PenicillinConc achieves higher yield, but at risk of collapse
-        both are good tho, both used probes
+---
 
-seed3_32/33 - same as above, but removed probes (seeing how does policy learn without them)
-    preparing for potential AEPILCO implementation
-    
+## Citation
 
+If you use this code or the methods described, please cite the dissertation:
 
-PLAN
-- Train seed3_12, and observer result (only difference is probes). 
-    If if keeps the yield as good as seed3_7, REMOVE num_high_feed_probes as they are not needed for good yield
-    If yield decreases it means that P(fix) did not help.
-        Then try without P(fix) and with num_high_feed_probes
+```
+Pranevičius, R. (2026). Data-efficient Reinforcement Learning for Non-stationary 
+Fed-batch Processes. MSc Dissertation, University of Edinburgh, School of Informatics.
+```
+
+The MC-PILCO algorithm is from:
+
+```
+Amadio, F., Dalla Libera, A., Antonello, R., Nikovski, D., Carli, R., & Romeres, D. (2022).
+Model-based policy search using Monte Carlo gradient estimation with real systems application.
+IEEE Transactions on Robotics, 38(6), 3879–3898.
+```
+
+The simulator is:
+
+```
+Zhang, M. (2020). PenSimPy: The Python implementation of IndPenSim.
+https://github.com/Mohan-Zhang-u/PenSimPy
+```
+
+---
+
+## Limitations and Future Work
+
+- Single action channel (substrate feed Fs) has limited control authority over penicillin yield relative to inter-batch variability — the main bottleneck is action-signal identifiability, not dynamics modelling.
+- n=3 training seeds; conclusions from cross-seed comparisons carry uncertainty.
+- Dual-GP decomposition is unlikely to improve control in this action space. Enriching the action space (aeration Fg, agitation RPM) is the more promising direction.
+- Method generalisation to other fed-batch organisms (e.g., E. coli acetate overflow, P. pastoris glycerol-to-methanol switch) is expected but not empirically verified.
+
+---
